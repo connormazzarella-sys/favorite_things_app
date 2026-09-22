@@ -17,3 +17,7 @@ dist/
 
 # editor-local settings, not project config
 .vscode/
+
+# manual backup copies/zip attempts made while troubleshooting Netlify uploads
+gdrive_app (Proto 1).zip
+gdrive_app - Copy/

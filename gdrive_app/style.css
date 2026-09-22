@@ -1,0 +1,151 @@
+:root { --accent: #4285F4; --bg: #ffffff; --text: #1a1a1a; --btn: #f5f5f5; }
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  padding-bottom: 190px;
+}
+#topbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 16px;
+  background: var(--accent);
+  color: white;
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+#topbar h1 { font-size: 18px; margin: 0; flex: 1; }
+.icon-btn { background: none; border: none; color: inherit; font-size: 20px; cursor: pointer; padding: 6px 10px; }
+#loginBtn {
+  padding: 8px 14px;
+  border: none;
+  border-radius: 8px;
+  background: white;
+  color: var(--accent);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.view { padding: 12px; }
+.genre-list { list-style: none; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.genre-list button {
+  width: 100%;
+  padding: 16px;
+  font-size: 16px;
+  font-weight: 600;
+  border: none;
+  border-radius: 10px;
+  background: var(--btn);
+  color: var(--text);
+  text-align: left;
+}
+
+.album-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 16px; }
+.album-card { cursor: pointer; text-align: center; }
+.album-card img { width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 8px; background: var(--btn); }
+.album-card .title { font-weight: 600; font-size: 13px; margin-top: 6px; }
+.album-card .artist { font-size: 12px; color: #777; }
+
+.song-list { list-style: none; padding: 0; }
+.song-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 14px 10px;
+  border-bottom: 1px solid #eee;
+}
+.song-list .track-name { flex: 1; cursor: pointer; }
+.song-list li.playing .track-name { color: var(--accent); font-weight: 700; }
+.song-list button {
+  border: none;
+  background: var(--btn);
+  border-radius: 6px;
+  padding: 6px 10px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+#player {
+  position: fixed;
+  bottom: 64px; left: 0; right: 0;
+  background: #f8f9fa;
+  border-top: 1px solid #ddd;
+  padding: 10px 16px 12px;
+  z-index: 20;
+}
+#nowPlaying { text-align: center; margin-bottom: 6px; }
+#nowPlayingTitle { font-weight: 700; font-size: 14px; }
+#nowPlayingArtist { font-size: 12px; color: #777; margin-top: 2px; }
+#audio { width: 100%; }
+.player-controls { display: flex; justify-content: center; align-items: center; gap: 24px; margin-top: 8px; }
+
+#bottomNav {
+  position: fixed;
+  bottom: 0; left: 0; right: 0;
+  display: flex;
+  background: var(--bg);
+  border-top: 1px solid #ddd;
+  z-index: 30;
+}
+.nav-btn {
+  flex: 1;
+  border: none;
+  background: none;
+  padding: 8px 4px 10px;
+  font-size: 20px;
+  color: #999;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}
+.nav-btn span { font-size: 11px; font-weight: 600; }
+.nav-btn.active { color: var(--accent); }
+
+.search-row { display: flex; gap: 8px; margin-bottom: 10px; }
+.search-row input { flex: 1; padding: 10px; border: 1px solid #ccc; border-radius: 8px; font-size: 14px; }
+.search-row button, .modal-actions button[type="submit"] {
+  padding: 10px 14px;
+  border: none;
+  border-radius: 8px;
+  background: var(--accent);
+  color: white;
+  font-weight: 600;
+  cursor: pointer;
+}
+.hint { font-size: 12px; color: #777; margin-bottom: 10px; min-height: 16px; }
+.radio-list { display: flex; flex-direction: column; gap: 8px; margin-bottom: 20px; }
+.radio-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 12px;
+  background: var(--btn);
+  border-radius: 8px;
+  font-size: 13px;
+}
+.radio-row small { color: #888; }
+.radio-row button { border: none; background: white; border-radius: 6px; padding: 6px 10px; margin-left: 6px; cursor: pointer; }
+
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: flex-end;
+  z-index: 50;
+}
+.modal-overlay[hidden] { display: none; }
+.modal-box { background: var(--bg); width: 100%; border-radius: 16px 16px 0 0; padding: 20px; max-height: 85vh; overflow-y: auto; }
+.modal-box h3 { margin: 0 0 12px; }
+#albumUploadForm { display: flex; flex-direction: column; gap: 6px; }
+#albumUploadForm label { font-size: 12px; font-weight: 700; margin-top: 8px; }
+#albumUploadForm input { padding: 10px; border: 1px solid #ccc; border-radius: 8px; font-size: 14px; }
+.modal-actions { display: flex; gap: 10px; margin-top: 16px; }
+.modal-actions button { flex: 1; padding: 10px; border-radius: 8px; border: none; font-weight: 600; cursor: pointer; }
+.modal-actions button[type="button"] { background: var(--btn); }
