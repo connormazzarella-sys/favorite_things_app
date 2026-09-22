@@ -19,16 +19,25 @@ function loadGapiClient() {
   });
 }
 
+let attemptingSilently = false;
+
 function initTokenClient() {
   tokenClient = google.accounts.oauth2.initTokenClient({
     client_id: CLIENT_ID,
     scope: SCOPE,
     callback: async (tokenResponse) => {
       if (tokenResponse.error) {
-        console.error(tokenResponse);
-        alert("Sign-in failed: " + tokenResponse.error);
+        // A silent auto-attempt failing just means "not currently signed
+        // in" (first visit, or fully logged out of Google) - that's the
+        // normal case, not an error, so just show the login button quietly.
+        if (!attemptingSilently) {
+          console.error(tokenResponse);
+          alert("Sign-in failed: " + tokenResponse.error);
+        }
+        attemptingSilently = false;
         return;
       }
+      attemptingSilently = false;
       accessToken = tokenResponse.access_token;
       gapi.client.setToken(tokenResponse);
       scheduleTokenRefresh(tokenResponse.expires_in);
@@ -36,6 +45,15 @@ function initTokenClient() {
       onSignedIn(); // defined in main.js - kicks off every tab
     },
   });
+}
+
+// Tries to sign in without any popup or user interaction, using your
+// existing Google session in this browser - succeeds silently if you've
+// signed into this app before and are still logged into Google, so you
+// don't have to tap "Sign in" every time you open the app.
+function attemptSilentSignIn() {
+  attemptingSilently = true;
+  tokenClient.requestAccessToken({ prompt: "" });
 }
 
 // Google's token-client flow doesn't hand out a refresh token to pure
@@ -55,10 +73,12 @@ async function setupFolderStructure() {
 }
 
 function login() {
+  attemptingSilently = false;
   tokenClient.requestAccessToken();
 }
 
 (async function initAuth() {
   await loadGapiClient();
   initTokenClient();
+  attemptSilentSignIn();
 })();
