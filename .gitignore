@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+
+# personal data (journals, music, favorites) - not source code
+MyFavoriteThingsData/
+
+# large runtime binaries, not source - keep them next to app.py locally,
+# but don't commit them to the repo
+ffmpeg.exe
+ffplay.exe
+ffprobe.exe
