@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>My Favorite Things</title>
+<link rel="manifest" href="/manifest.json">
+<meta name="theme-color" content="#4a7c59">
+<link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+  <header id="topbar">
+    <button id="backBtn" class="icon-btn" hidden>&#8592;</button>
+    <h1 id="topTitle">My Favorite Things</h1>
+    <button id="addBtn" class="icon-btn" hidden>&#10133;</button>
+  </header>
+
+  <main id="content">
+    <!-- LIBRARY TAB -->
+    <section id="librarySection" class="tab-section">
+      <div id="genreView" class="view">
+        <div id="genreList" class="genre-list"></div>
+      </div>
+      <div id="albumView" class="view" hidden>
+        <div id="albumGrid" class="album-grid"></div>
+      </div>
+      <div id="songView" class="view" hidden>
+        <div id="songList" class="song-list"></div>
+      </div>
+    </section>
+
+    <!-- RADIO TAB -->
+    <section id="radioSection" class="tab-section" hidden>
+      <div class="view">
+        <div class="search-row">
+          <input id="radioSearchInput" type="text" placeholder="Search stations (e.g. NPR, jazz)">
+          <button id="radioSearchBtn">Search</button>
+        </div>
+        <div id="radioStatus" class="hint"></div>
+        <h3>Results</h3>
+        <div id="radioResults" class="radio-list"></div>
+        <h3>My Stations</h3>
+        <div id="radioSaved" class="radio-list"></div>
+        <audio id="radioAudio" controls hidden></audio>
+      </div>
+    </section>
+  </main>
+
+  <!-- Add Album modal (reached via the "+" in the Library header) -->
+  <div id="addAlbumModal" class="modal-overlay" hidden>
+    <div class="modal-box">
+      <h3 id="addAlbumHeading">Add Album</h3>
+      <form id="uploadForm">
+        <label>Album</label>
+        <input id="uploadAlbum" placeholder="Album name" required>
+        <label>Artist</label>
+        <input id="uploadArtist" placeholder="Artist name">
+        <label>Songs (.mp3)</label>
+        <input id="uploadFiles" type="file" accept=".mp3,.m4a" multiple required>
+        <div class="modal-actions">
+          <button type="button" id="cancelUpload">Cancel</button>
+          <button type="submit">Add</button>
+        </div>
+      </form>
+      <div id="uploadStatus" class="hint"></div>
+    </div>
+  </div>
+
+  <footer id="player" hidden>
+    <div id="nowPlaying">
+      <div id="nowPlayingTitle">---</div>
+      <div id="nowPlayingArtist"></div>
+    </div>
+    <audio id="audio" controls></audio>
+    <div class="player-controls">
+      <button id="prevBtn" class="icon-btn">&#9198;</button>
+      <button id="shuffleBtn" class="icon-btn">&#128256; OFF</button>
+      <button id="nextBtn" class="icon-btn">&#9197;</button>
+    </div>
+  </footer>
+
+  <nav id="bottomNav">
+    <button class="nav-btn active" data-tab="library">&#127925;<span>Library</span></button>
+    <button class="nav-btn" data-tab="radio">&#128225;<span>Radio</span></button>
+  </nav>
+
+  <script src="/static/js/app.js"></script>
+</body>
+</html>

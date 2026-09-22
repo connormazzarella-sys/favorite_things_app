@@ -9,3 +9,8 @@ MyFavoriteThingsData/
 ffmpeg.exe
 ffplay.exe
 ffprobe.exe
+
+# PyInstaller build output - regenerate with BuildExe.bat, don't commit
+build/
+dist/
+*.spec

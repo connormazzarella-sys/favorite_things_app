@@ -1,48 +1,127 @@
 import os
+import sys
 import shutil
 import json
 import random
 import threading
+import subprocess
+import re
+import colorsys
+import requests
+from urllib.parse import urljoin
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox, simpledialog
+from tkinter import ttk, filedialog, messagebox, simpledialog, colorchooser
 from datetime import datetime
 import pygame
 from PIL import Image, ImageTk, ImageSequence, ImageDraw
 from io import BytesIO
+from tkinterdnd2 import TkinterDnD, DND_FILES, DND_TEXT
 
 # --- EXTERNAL LIBRARIES ---
-import yt_dlp
 from mutagen.mp3 import MP3
-from mutagen.id3 import ID3, APIC, TIT2, TPE1, TALB
+from mutagen.id3 import ID3, APIC, TIT2, TPE1
 
 # Hide Pygame welcome message
 os.environ['PYGAME_HIDE_SUPPORT_PROMPT'] = "hide"
 
 # --- CONFIGURATION ---
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+# When frozen by PyInstaller, __file__ points into a temp extraction folder,
+# not the real exe location, so data/binaries would be lost between runs.
+if getattr(sys, 'frozen', False):
+    BASE_DIR = os.path.dirname(os.path.abspath(sys.executable))
+else:
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.environ.get("MYFAV_DATA_DIR", os.path.join(BASE_DIR, "MyFavoriteThingsData"))
 
 THEME = {
-    "bg": "#ffffff", 
-    "card": "#f8f9fa", 
+    "bg": "#ffffff",
+    "card": "#f8f9fa",
     "accent": "#4a7c59",
     "vibrant_green": "#2ecc71",
-    "entry_bg": "#eafaf1", 
-    "text": "#1a1a1a", 
+    "entry_bg": "#eafaf1",
+    "text": "#1a1a1a",
     "btn": "#f5f5f5",
     "paper": "#fffcf5",
     "lines": "#e0d9c5",
     "highlight": "#dcedc8"
 }
 
+# --- THEME STARTING POINTS ---
+# Purely optional color presets offered when the user creates a new theme in
+# the Theme tab - the user always picks, edits, names, and saves their own
+# themes; these are just convenient seasonal starting palettes, not imposed.
+THEME_PRESETS = {
+    # Dark mode is auto-derived from whichever theme is active (see make_dark_variant),
+    # so presets only need to cover distinct light-mode starting points - no more
+    # separate "X Light" / "X Dark" pairs needed.
+    "Blank (current colors)": {},
+    "Winter": {"bg": "#ffffff", "text": "#1a1a1a", "accent": "#3b6e8f", "entry_bg": "#eaf3fa", "highlight": "#cfe8f3"},
+    "Spring": {"bg": "#ffffff", "text": "#1a1a1a", "accent": "#5ea16a", "entry_bg": "#eafaf0", "highlight": "#d7f2c2"},
+    "Summer": {"bg": "#ffffff", "text": "#1a1a1a", "accent": "#e08e2b", "entry_bg": "#fff8e6", "highlight": "#ffe6a8"},
+    "Autumn": {"bg": "#ffffff", "text": "#1a1a1a", "accent": "#b5651d", "entry_bg": "#fdf0e1", "highlight": "#f2d19e"},
+    # A couple of well-known, freely-published editor palettes (colors aren't
+    # copyrightable - these are just widely-used, publicly documented hex values)
+    "Nord": {"bg": "#2e3440", "text": "#eceff4", "accent": "#88c0d0", "entry_bg": "#3b4252", "highlight": "#81a1c1"},
+    "Dracula": {"bg": "#282a36", "text": "#f8f8f2", "accent": "#bd93f9", "entry_bg": "#44475a", "highlight": "#ff79c6"},
+}
+THEME_COLOR_KEYS = ["bg", "text", "accent", "entry_bg", "highlight"]  # the ones exposed for editing
+
+def _hex_to_rgb(h):
+    h = h.lstrip('#')
+    return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
+
+def _rgb_to_hex(rgb):
+    return '#%02x%02x%02x' % tuple(max(0, min(255, int(c))) for c in rgb)
+
+def _blend(hex1, hex2, t):
+    r1, g1, b1 = _hex_to_rgb(hex1); r2, g2, b2 = _hex_to_rgb(hex2)
+    return _rgb_to_hex((r1 + (r2 - r1) * t, g1 + (g2 - g1) * t, b1 + (b2 - b1) * t))
+
+def derive_full_theme(colors):
+    """Every widget surface beyond the 5 user-picked colors (button/card/paper/
+    divider) is computed from bg/text, so ANY theme - built-in or custom - gets
+    a coherent, readable button/journal surface without the user picking 10+ colors."""
+    full = dict(colors)
+    bg = full.get("bg", "#ffffff")
+    text = full.get("text", "#1a1a1a")
+    full["btn"] = _blend(bg, text, 0.18)
+    full["card"] = _blend(bg, text, 0.06)
+    full["paper"] = _blend(bg, text, 0.05)
+    full["lines"] = _blend(bg, text, 0.30)
+    full["vibrant_green"] = "#2ecc71"
+    return full
+
+def make_dark_variant(colors):
+    """Derives a dark mode FROM the theme's own accent hue, so e.g. Autumn's dark
+    mode reads as a dark burnt orange, not a generic near-black - the theme's
+    character carries through instead of dark mode washing it out to neutral."""
+    h, l, s = colorsys.rgb_to_hls(*(c / 255 for c in _hex_to_rgb(colors.get("accent", "#4a7c59"))))
+    def hls_hex(lightness, saturation):
+        r, g, b = colorsys.hls_to_rgb(h, lightness, saturation)
+        return _rgb_to_hex((r * 255, g * 255, b * 255))
+    sat = max(0.45, s)  # keep the hue visibly present rather than washed toward gray
+    return {
+        "bg": hls_hex(0.20, sat),
+        "text": "#f5f0e8",
+        "accent": hls_hex(max(0.62, l), min(1.0, sat + 0.15)),
+        "entry_bg": hls_hex(0.27, sat),
+        "highlight": hls_hex(0.36, sat),
+    }
+
 MUSIC_DIR = os.path.join(DATA_DIR, "music")
 JOURNAL_DIR = os.path.join(DATA_DIR, "journals")
 SETTINGS_FILE = os.path.join(DATA_DIR, "favorites.json")
 
+# --- RADIO ---
+# Stations are found via the free, keyless Radio Browser API (radio-browser.info)
+# and added manually by the user - only stations with a real, health-checked
+# direct stream URL ever show up in search, so every result is playable.
+RADIO_SEARCH_API = "https://de1.api.radio-browser.info/json/stations/search"
+
 for d in [MUSIC_DIR, JOURNAL_DIR]:
     os.makedirs(d, exist_ok=True)
 
-class MyFavoriteThingsApp(tk.Tk):
+class MyFavoriteThingsApp(TkinterDnD.Tk):
     def __init__(self):
         super().__init__()
         
@@ -57,11 +136,33 @@ class MyFavoriteThingsApp(tk.Tk):
         self.is_paused = False
         self.shuffle_on = False
         self.gif_frames = []
+        self.gif_pil_frames = []
+        self.gif_durations = []
         self.gif_idx = 0
+        self.gif_size = self.settings.get("gif_size", 60)
+        self.gif_speed = self.settings.get("gif_speed", 1.0)  # multiplier on each frame's native duration
+        self.gif_after_id = None
         self.song_length = 0
         self.autosave_timer = None
-        self.fetch_timer = None
-        self.loaded_journal_file = None 
+        self.loaded_journal_file = None
+        self.my_radio_stations = self.settings.get("radio_stations", [])  # [{"name":..,"url":..}, ...]
+        self.radio_search_results = []
+        self.radio_proc = None
+        self.radio_playing_name = None
+
+        # --- THEMES (fully user-authored: colors + header decoration gifs) ---
+        self.themes = self.settings.get("themes", {})
+        if not self.themes:
+            self.themes["Default"] = {"colors": {k: THEME[k] for k in THEME_COLOR_KEYS}, "decorations": []}
+        self.active_theme_name = self.settings.get("active_theme", "Default")
+        if self.active_theme_name not in self.themes:
+            self.active_theme_name = next(iter(self.themes))
+        # Dark mode is a derived variant of whichever theme is active (see
+        # make_dark_variant) - not a separate theme, so it always carries that
+        # theme's own hue (e.g. Autumn's dark mode is warm brown, not neutral black).
+        self.dark_mode = self.settings.get("dark_mode", False)
+        self._apply_active_theme_colors()
+        self.decoration_widgets = []  # [{"label":.., "frames":[PhotoImage,...], "idx":0, "record":dec}, ...]
 
         pygame.mixer.init()
         self.header_font = ("Verdana", 14, "bold")
@@ -80,19 +181,25 @@ class MyFavoriteThingsApp(tk.Tk):
         self.setup_notebook()
         
         self.init_music_tab()
-        self.init_downloader_tab()
         self.init_journal_tab()
         self.init_favorites_tab()
-        
+        self.init_radio_tab()
+        self.init_theme_tab()
+
         # 3. LOAD DATA
         self.refresh_genres()
         self.refresh_journals()
         self.update_clock()
-        self.check_music_end() 
-        
+        self.check_music_end()
+
         if self.current_gif_path and os.path.exists(self.current_gif_path):
             self.load_gif_from_path(self.current_gif_path)
-            
+
+        self.render_decorations()
+
+        self.drop_target_register(DND_FILES, DND_TEXT)
+        self.dnd_bind('<<Drop>>', self.on_gif_drop)
+
         self.protocol("WM_DELETE_WINDOW", self.on_closing)
 
     def load_settings(self):
@@ -100,10 +207,15 @@ class MyFavoriteThingsApp(tk.Tk):
             try:
                 with open(SETTINGS_FILE, "r") as f: return json.load(f)
             except: pass
-        return {"gif_path": "", "favorites": {"Books": [], "Songs": [], "Artists": [], "Movies": []}}
+        return {"gif_path": "", "favorites": {"Books": [], "Songs": [], "Artists": [], "Movies": []}, "radio_stations": [],
+                "themes": {}, "active_theme": "Default"}
 
     def save_all_data(self):
-        data = {"gif_path": self.current_gif_path, "favorites": self.favorites}
+        data = {
+            "gif_path": self.current_gif_path, "gif_size": self.gif_size, "gif_speed": self.gif_speed,
+            "favorites": self.favorites, "radio_stations": self.my_radio_stations,
+            "themes": self.themes, "active_theme": self.active_theme_name, "dark_mode": self.dark_mode,
+        }
         with open(SETTINGS_FILE, "w") as f: json.dump(data, f, indent=4)
 
     def update_clock(self):
@@ -112,6 +224,7 @@ class MyFavoriteThingsApp(tk.Tk):
 
     def on_closing(self):
         self.save_all_data()
+        self.stop_all_radio()
         pygame.mixer.quit()
         self.destroy()
 
@@ -121,13 +234,13 @@ class MyFavoriteThingsApp(tk.Tk):
     def init_music_tab(self):
         self.m_left = tk.Frame(self.music_tab, width=260, bg=THEME["bg"], borderwidth=1, relief="solid")
         self.m_left.pack(side="left", fill="y", padx=2, pady=2); self.m_left.pack_propagate(False)
-        tk.Label(self.m_left, text="GENRES", font=self.header_font, bg=THEME["bg"]).pack(pady=(10,5))
-        
+        tk.Label(self.m_left, text="GENRES", font=self.header_font, bg=THEME["bg"], fg=THEME["text"]).pack(pady=(10,5))
+
         btn_g_f = tk.Frame(self.m_left, bg=THEME["bg"]); btn_g_f.pack(fill="x", pady=5)
         inner_btn_f = tk.Frame(btn_g_f, bg=THEME["bg"]); inner_btn_f.pack(expand=True)
-        tk.Button(inner_btn_f, text="+", font=("Arial", 11, "bold"), width=4, command=self.add_genre).pack(side="left", padx=2)
-        tk.Button(inner_btn_f, text="-", font=("Arial", 11, "bold"), width=4, command=self.remove_genre).pack(side="left", padx=2)
-        tk.Button(inner_btn_f, text="Edit", font=("Arial", 11, "bold"), width=6, command=self.rename_genre).pack(side="left", padx=2)
+        tk.Button(inner_btn_f, text="+", font=("Arial", 11, "bold"), width=4, bg=THEME["btn"], fg=THEME["text"], command=self.add_genre).pack(side="left", padx=2)
+        tk.Button(inner_btn_f, text="-", font=("Arial", 11, "bold"), width=4, bg=THEME["btn"], fg=THEME["text"], command=self.remove_genre).pack(side="left", padx=2)
+        tk.Button(inner_btn_f, text="Edit", font=("Arial", 11, "bold"), width=6, bg=THEME["btn"], fg=THEME["text"], command=self.rename_genre).pack(side="left", padx=2)
         
         self.genre_canvas = tk.Canvas(self.m_left, bg=THEME["bg"], highlightthickness=0)
         self.genre_scroll = ttk.Scrollbar(self.m_left, orient="vertical", command=self.genre_canvas.yview)
@@ -139,31 +252,31 @@ class MyFavoriteThingsApp(tk.Tk):
 
         self.m_right = tk.Frame(self.music_tab, width=320, bg=THEME["bg"], borderwidth=1, relief="solid")
         self.m_right.pack(side="right", fill="y", padx=2, pady=2); self.m_right.pack_propagate(False)
-        self.album_info_label = tk.Label(self.m_right, text="SELECT AN ALBUM", font=("Segoe UI", 11, "bold"), bg=THEME["bg"], wraplength=280)
+        self.album_info_label = tk.Label(self.m_right, text="SELECT AN ALBUM", font=("Segoe UI", 11, "bold"), bg=THEME["bg"], fg=THEME["text"], wraplength=280)
         self.album_info_label.pack(pady=15)
         tk.Frame(self.m_right, height=2, bg=THEME["accent"]).pack(fill="x", padx=20, pady=5)
-        self.song_box = tk.Listbox(self.m_right, font=self.list_font, bg=THEME["bg"], borderwidth=0, activestyle='none', selectbackground=THEME["accent"], selectforeground="white")
+        self.song_box = tk.Listbox(self.m_right, font=self.list_font, bg=THEME["bg"], fg=THEME["text"], borderwidth=0, activestyle='none', selectbackground=THEME["accent"], selectforeground="white")
         self.song_box.pack(fill="both", expand=True, padx=5, pady=5)
         self.song_box.bind("<Double-1>", lambda e: self.play_song())
 
         self.m_center = tk.Frame(self.music_tab, bg=THEME["bg"]); self.m_center.pack(side="left", fill="both", expand=True)
         self.control_bar = tk.Frame(self.m_center, height=180, bg=THEME["bg"], borderwidth=1, relief="solid")
         self.control_bar.pack(side="bottom", fill="x", padx=2, pady=2); self.control_bar.pack_propagate(False)
-        self.track_info_main = tk.Label(self.control_bar, text="---", font=("Segoe UI", 11, "bold"), bg=THEME["bg"])
+        self.track_info_main = tk.Label(self.control_bar, text="---", font=("Segoe UI", 11, "bold"), bg=THEME["bg"], fg=THEME["text"])
         self.track_info_main.pack(pady=(10, 0))
         self.prog_bar = ttk.Progressbar(self.control_bar, length=500, mode='determinate')
         self.prog_bar.pack(pady=10)
-        
+
         self.center_btn_container = tk.Frame(self.control_bar, bg=THEME["bg"]); self.center_btn_container.pack(expand=True)
-        tk.Button(self.center_btn_container, text="⏮", font=self.ctrl_font, width=4, command=lambda: self.skip_song(prev=True)).pack(side="left", padx=5)
-        tk.Button(self.center_btn_container, text="▶", font=self.ctrl_font, width=4, command=self.resume_music).pack(side="left", padx=5)
-        tk.Button(self.center_btn_container, text="⏸", font=self.ctrl_font, width=4, command=self.pause_music).pack(side="left", padx=5)
-        tk.Button(self.center_btn_container, text="⏭", font=self.ctrl_font, width=4, command=self.skip_song).pack(side="left", padx=5)
+        tk.Button(self.center_btn_container, text="⏮", font=self.ctrl_font, width=4, bg=THEME["btn"], fg=THEME["text"], command=lambda: self.skip_song(prev=True)).pack(side="left", padx=5)
+        tk.Button(self.center_btn_container, text="▶", font=self.ctrl_font, width=4, bg=THEME["btn"], fg=THEME["text"], command=self.resume_music).pack(side="left", padx=5)
+        tk.Button(self.center_btn_container, text="⏸", font=self.ctrl_font, width=4, bg=THEME["btn"], fg=THEME["text"], command=self.pause_music).pack(side="left", padx=5)
+        tk.Button(self.center_btn_container, text="⏭", font=self.ctrl_font, width=4, bg=THEME["btn"], fg=THEME["text"], command=self.skip_song).pack(side="left", padx=5)
         tk.Frame(self.center_btn_container, width=30, bg=THEME["bg"]).pack(side="left")
-        self.shuffle_btn = tk.Button(self.center_btn_container, text="🔀 OFF", font=self.ctrl_font, width=8, command=self.toggle_shuffle)
+        self.shuffle_btn = tk.Button(self.center_btn_container, text="🔀 OFF", font=self.ctrl_font, width=8, bg=THEME["btn"], fg=THEME["text"], command=self.toggle_shuffle)
         self.shuffle_btn.pack(side="left", padx=10)
         vol_f = tk.Frame(self.center_btn_container, bg=THEME["bg"]); vol_f.pack(side="left", padx=5)
-        tk.Label(vol_f, text="VOL", font=("Segoe UI", 8, "bold"), bg=THEME["bg"]).pack()
+        tk.Label(vol_f, text="VOL", font=("Segoe UI", 8, "bold"), bg=THEME["bg"], fg=THEME["text"]).pack()
         ttk.Scale(vol_f, from_=0, to=1, orient="horizontal", command=self.set_volume, length=100).pack()
         
         self.canvas = tk.Canvas(self.m_center, bg=THEME["bg"], highlightthickness=0)
@@ -180,9 +293,8 @@ class MyFavoriteThingsApp(tk.Tk):
         self.all_genres = sorted([d.upper() for d in os.listdir(MUSIC_DIR) if os.path.isdir(os.path.join(MUSIC_DIR, d))])
         for widget in self.genre_frame.winfo_children(): widget.destroy()
         for g in self.all_genres:
-            btn = tk.Button(self.genre_frame, text=g, font=("Segoe UI", 10, "bold"), bg=THEME["btn"], height=2, width=25, command=lambda genre=g: self.load_genre_view(genre))
+            btn = tk.Button(self.genre_frame, text=g, font=("Segoe UI", 10, "bold"), bg=THEME["btn"], fg=THEME["text"], height=2, width=25, command=lambda genre=g: self.load_genre_view(genre))
             btn.pack(pady=2, padx=5, fill="x")
-        if hasattr(self, 'dl_genre_cb'): self.dl_genre_cb['values'] = [g.lower() for g in self.all_genres]
 
     def add_genre(self):
         n = simpledialog.askstring("New", "Genre Name:")
@@ -272,15 +384,15 @@ class MyFavoriteThingsApp(tk.Tk):
             img_pil = self.get_embedded_art(p)
             img = ImageTk.PhotoImage(img_pil) if img_pil else None
             
-            btn = tk.Button(frame, image=img, compound="top", width=150, height=150, command=lambda path=p: self.select_and_play_folder(path))
-            if img: btn.image = img 
-            
+            btn = tk.Button(frame, image=img, compound="top", width=150, height=150, bg=THEME["btn"], command=lambda path=p: self.select_and_play_folder(path))
+            if img: btn.image = img
+
             btn.bind("<Button-3>", lambda e, path=p: self.edit_album_popup(path, genre_name))
             btn.bind("<Control-Button-1>", lambda e, path=p: self.edit_album_popup(path, genre_name))
             btn.pack()
-            
-            tk.Label(frame, text=item["meta"]["title"], font=("Segoe UI", 9, "bold"), bg=THEME["bg"], wraplength=150).pack()
-            tk.Label(frame, text=item["meta"]["artist"], font=("Segoe UI", 8), bg=THEME["bg"], fg="#555", wraplength=150).pack()
+
+            tk.Label(frame, text=item["meta"]["title"], font=("Segoe UI", 9, "bold"), bg=THEME["bg"], fg=THEME["text"], wraplength=150).pack()
+            tk.Label(frame, text=item["meta"]["artist"], font=("Segoe UI", 8), bg=THEME["bg"], fg="gray", wraplength=150).pack()
             c += 1
             if c >= 4: c=0; r+=1
 
@@ -330,162 +442,6 @@ class MyFavoriteThingsApp(tk.Tk):
         if self.current_songs_list: self.play_song(0)
 
     # ==========================
-    # UI: DOWNLOADER (BANDCAMP OPTIMIZED)
-    # ==========================
-    def init_downloader_tab(self):
-        container = tk.Frame(self.dl_tab, bg="white", pady=20); container.pack(fill="both", expand=True)
-        tk.Label(container, text="Paste Bandcamp/Music URL Here:", font=("Segoe UI", 12, "bold"), bg="white").pack(pady=(10,0))
-        self.url_var = tk.StringVar(); self.url_var.trace_add("write", self.on_url_change)
-        tk.Entry(container, textvariable=self.url_var, width=60, bg=THEME["entry_bg"]).pack(pady=5)
-        self.dl_ents = {}
-        
-        # --- FIXED LABEL: "Title (Album)" -> "Title:" ---
-        for l, k in [("Title:", "title"), ("Artist:", "artist")]:
-            tk.Label(container, text=l, bg="white").pack(); ent = tk.Entry(container, width=50, bg=THEME["entry_bg"]); ent.pack(pady=2); self.dl_ents[k] = ent
-            
-        self.dl_genre_cb = ttk.Combobox(container); self.dl_genre_cb.pack(pady=5)
-        tk.Button(container, text="Download (Max 50 Songs)", bg=THEME["accent"], fg="white", width=25, command=self.start_download).pack(pady=20)
-        self.dl_status = tk.Label(container, text="Ready", bg="white", font=("Arial", 10, "bold")); self.dl_status.pack()
-        self.dl_progress = ttk.Progressbar(container, length=400, mode='determinate'); self.dl_progress.pack(pady=10)
-
-    def on_url_change(self, *args):
-        if self.fetch_timer: self.after_cancel(self.fetch_timer)
-        self.fetch_timer = self.after(1000, self.auto_fetch_info)
-
-    def auto_fetch_info(self):
-        u = self.url_var.get()
-        if len(u) < 8: return
-        self.dl_status.config(text="Fetching info...", fg="blue")
-        def run():
-            try:
-                # --- FIXED: REMOVED 'extract_flat' to force deep scan of Bandcamp pages ---
-                with yt_dlp.YoutubeDL({'quiet': True}) as ydl:
-                    info = ydl.extract_info(u, download=False)
-                    self.after(0, lambda: self.fill_dl_info(info))
-            except: self.after(0, lambda: self.dl_status.config(text="Info fetch failed", fg="red"))
-        threading.Thread(target=run, daemon=True).start()
-
-    def fill_dl_info(self, info):
-        # 1. FETCH TITLE
-        title = info.get('title', '')
-        self.dl_ents['title'].delete(0, tk.END); self.dl_ents['title'].insert(0, title)
-        
-        # 2. FETCH ARTIST (Bandcamp Optimized)
-        artist = info.get('artist') or info.get('uploader') or info.get('channel') or ''
-        
-        # Fallback: Check inside entries (common for albums)
-        if not artist and 'entries' in info and len(info['entries']) > 0:
-            first = info['entries'][0]
-            artist = first.get('artist') or first.get('uploader') or ''
-            
-        # Fallback: Check URL subdomain (e.g. soulmass.bandcamp.com -> soulmass)
-        if not artist and 'webpage_url_domain' in info:
-            # try to get subdomain if possible, otherwise use uploader_id
-            artist = info.get('uploader_id') or ''
-
-        self.dl_ents['artist'].delete(0, tk.END); self.dl_ents['artist'].insert(0, artist)
-        self.dl_status.config(text="Info Loaded", fg="green")
-
-    def start_download(self):
-        u = self.url_var.get(); g = self.dl_genre_cb.get(); t = self.dl_ents['title'].get().strip()
-        a = self.dl_ents['artist'].get().strip()
-        if not u or not g or not t: messagebox.showwarning("Error", "Missing info."); return
-        self.dl_status.config(text="Initializing...", fg="blue")
-        self.dl_progress['value'] = 0
-        threading.Thread(target=self.run_dl, args=(u, {"title": t, "artist": a}, g), daemon=True).start()
-
-    def run_dl(self, u, d, g):
-        # 1. Setup Directory
-        safe_title = "".join([c for c in d['title'] if c.isalnum() or c in (' ', '.', '_')]).strip()
-        path = os.path.join(MUSIC_DIR, g, safe_title)
-        os.makedirs(path, exist_ok=True)
-        
-        # Save Metadata
-        with open(os.path.join(path, "metadata.json"), "w") as f: json.dump(d, f)
-        
-        # 2. Progress Hook
-        def hook(x):
-            if x['status'] == 'downloading':
-                # --- FIXED BATCH PROGRESS ---
-                idx = x.get('info_dict', {}).get('playlist_index', 1) or 1
-                total = x.get('info_dict', {}).get('n_entries', 1) or 1
-                
-                file_pct = 0
-                if x.get('total_bytes'): file_pct = x['downloaded_bytes'] / x['total_bytes']
-                elif x.get('total_bytes_estimate'): file_pct = x['downloaded_bytes'] / x['total_bytes_estimate']
-                
-                # Formula: ((Previous Songs) + (Current %)) / Total
-                global_pct = ((idx - 1) + file_pct) / total * 100
-                self.after(0, lambda: self.update_dl_ui(global_pct, f"DL: {idx}/{total} ({int(global_pct)}%)"))
-                
-            elif x['status'] == 'finished':
-                self.after(0, lambda: self.dl_status.config(text="Processing audio conversion..."))
-
-        # 3. Download Options
-        opts = {
-            'format': 'bestaudio/best', 
-            'outtmpl': f'{path}/%(title)s.%(ext)s', 
-            'progress_hooks': [hook], 
-            'playlistend': 50,
-            
-            # --- BANDCAMP/YT-DLP POST PROCESSING ---
-            'writethumbnail': True,
-            'addmetadata': True,
-            'postprocessors': [
-                {'key': 'FFmpegExtractAudio','preferredcodec': 'mp3','preferredquality': '192'},
-                {'key': 'EmbedThumbnail'}, 
-                {'key': 'FFmpegMetadata'}, 
-            ],
-            'noplaylist': False,
-            'quiet': True,
-            'no_warnings': True
-        }
-
-        # 4. Execute Download
-        try:
-            with yt_dlp.YoutubeDL(opts) as ydl: 
-                ydl.download([u])
-            
-            # 5. --- FORCE ARTIST TAGGING ---
-            self.after(0, lambda: self.dl_status.config(text="Tagging Files..."))
-            
-            user_artist = d.get('artist', 'Unknown Artist').strip()
-            album_title = d.get('title', '').strip()
-
-            for f in os.listdir(path):
-                if f.lower().endswith(".mp3"):
-                    full_p = os.path.join(path, f)
-                    try:
-                        audio = ID3(full_p)
-                        
-                        # Set Artist
-                        audio.add(TPE1(encoding=3, text=user_artist))
-                        
-                        # Set Album (using the title from the text box)
-                        if album_title:
-                            audio.add(TALB(encoding=3, text=album_title))
-                        
-                        # If Title missing, use filename
-                        if "TIT2" not in audio:
-                            clean_title = os.path.splitext(f)[0]
-                            audio.add(TIT2(encoding=3, text=clean_title))
-                            
-                        audio.save()
-                    except Exception as tag_err:
-                        print(f"Tag error on {f}: {tag_err}")
-
-            self.after(0, lambda: self.dl_status.config(text="Complete!", fg="green"))
-            self.after(0, lambda: self.dl_progress.configure(value=100))
-            self.after(500, self.refresh_genres)
-            
-        except Exception as e: 
-            self.after(0, lambda: self.dl_status.config(text=f"Error: {str(e)[:20]}...", fg="red"))
-
-    def update_dl_ui(self, val, msg):
-        self.dl_progress['value'] = val
-        self.dl_status.config(text=msg)
-
-    # ==========================
     # UI: JOURNAL
     # ==========================
     def init_journal_tab(self):
@@ -493,15 +449,15 @@ class MyFavoriteThingsApp(tk.Tk):
         j_btn_f = tk.Frame(self.j_sidebar, bg=THEME["bg"]); j_btn_f.pack(fill="x", pady=5)
         tk.Button(j_btn_f, text="+ New", bg=THEME["accent"], fg="white", command=self.new_journal).pack(side="left", expand=True, fill="x", padx=2)
         tk.Button(j_btn_f, text="- Delete", bg="#ff4444", fg="white", command=self.delete_journal).pack(side="left", expand=True, fill="x", padx=2)
-        self.j_list = tk.Listbox(self.j_sidebar, font=("Arial", 12, "bold"), bg="#f8f9fa"); self.j_list.pack(fill="both", expand=True); self.j_list.bind("<<ListboxSelect>>", self.load_journal_entry)
+        self.j_list = tk.Listbox(self.j_sidebar, font=("Arial", 12, "bold"), bg=THEME["bg"], fg=THEME["text"]); self.j_list.pack(fill="both", expand=True); self.j_list.bind("<<ListboxSelect>>", self.load_journal_entry)
         right = tk.Frame(self.journal_tab, bg=THEME["paper"]); right.pack(side="right", fill="both", expand=True)
         self.j_status_label = tk.Label(right, text="Saved", font=("Arial", 8), bg=THEME["paper"], fg="gray"); self.j_status_label.pack(side="top", anchor="e", padx=20)
         self.j_title_var = tk.StringVar()
-        tk.Label(right, text="ENTRY TITLE:", font=("Georgia", 10, "bold"), bg=THEME["paper"]).pack(pady=(5,0))
-        self.j_title_ent = tk.Entry(right, textvariable=self.j_title_var, font=self.journal_title_font, bg=THEME["paper"], bd=0, highlightthickness=0, justify="center"); self.j_title_ent.pack(fill="x", padx=100); self.j_title_ent.bind("<KeyRelease>", self.trigger_autosave)
+        tk.Label(right, text="ENTRY TITLE:", font=("Georgia", 10, "bold"), bg=THEME["paper"], fg=THEME["text"]).pack(pady=(5,0))
+        self.j_title_ent = tk.Entry(right, textvariable=self.j_title_var, font=self.journal_title_font, bg=THEME["paper"], fg=THEME["text"], insertbackground=THEME["text"], bd=0, highlightthickness=0, justify="center"); self.j_title_ent.pack(fill="x", padx=100); self.j_title_ent.bind("<KeyRelease>", self.trigger_autosave)
         tk.Frame(right, height=2, bg=THEME["lines"]).pack(fill="x", padx=100, pady=(0, 20))
         paper_container = tk.Frame(right, bg=THEME["paper"]); paper_container.pack(fill="both", expand=True, padx=60)
-        self.j_text = tk.Text(paper_container, font=self.journal_font, wrap="word", bg=THEME["paper"], borderwidth=0, highlightthickness=0, spacing1=15); self.j_text.pack(fill="both", expand=True); self.j_text.bind("<KeyRelease>", self.trigger_autosave)
+        self.j_text = tk.Text(paper_container, font=self.journal_font, wrap="word", bg=THEME["paper"], fg=THEME["text"], insertbackground=THEME["text"], borderwidth=0, highlightthickness=0, spacing1=15); self.j_text.pack(fill="both", expand=True); self.j_text.bind("<KeyRelease>", self.trigger_autosave)
         tk.Button(right, text="Force Save", bg=THEME["accent"], fg="white", width=25, command=self.save_journal).pack(pady=20)
 
     def trigger_autosave(self, event=None):
@@ -572,22 +528,22 @@ class MyFavoriteThingsApp(tk.Tk):
 
     def toggle_shuffle(self):
         self.shuffle_on = not self.shuffle_on
-        self.shuffle_btn.config(text="🔀 ON" if self.shuffle_on else "🔀 OFF", fg=THEME["vibrant_green"] if self.shuffle_on else "black")
+        self.shuffle_btn.config(text="🔀 ON" if self.shuffle_on else "🔀 OFF", fg=THEME["vibrant_green"] if self.shuffle_on else THEME["text"])
 
     def init_favorites_tab(self):
-        container = tk.Frame(self.favorites_tab, bg="white"); container.pack(fill="both", expand=True, padx=50, pady=20)
-        tk.Label(container, text="MY FAVORITES", font=("Georgia", 24, "bold"), bg="white", fg=THEME["accent"]).pack(pady=(0,20))
-        grid_f = tk.Frame(container, bg="white"); grid_f.pack(fill="both", expand=True)
+        container = tk.Frame(self.favorites_tab, bg=THEME["bg"]); container.pack(fill="both", expand=True, padx=50, pady=20)
+        tk.Label(container, text="MY FAVORITES", font=("Georgia", 24, "bold"), bg=THEME["bg"], fg=THEME["accent"]).pack(pady=(0,20))
+        grid_f = tk.Frame(container, bg=THEME["bg"]); grid_f.pack(fill="both", expand=True)
         self.fav_vars = {}
         for i, cat in enumerate(["Books", "Songs", "Artists", "Movies"]):
-            f = tk.LabelFrame(grid_f, text=f" {cat} ", bg="white", font=("Arial", 14, "bold"), fg=THEME["accent"])
+            f = tk.LabelFrame(grid_f, text=f" {cat} ", bg=THEME["bg"], font=("Arial", 14, "bold"), fg=THEME["accent"])
             f.grid(row=i//2, column=i%2, sticky="nsew", padx=20, pady=20)
             grid_f.grid_columnconfigure(i%2, weight=1); grid_f.grid_rowconfigure(i//2, weight=1)
-            lf = tk.Frame(f, bg="white"); lf.pack(fill="both", expand=True, padx=10, pady=10)
-            b1 = tk.Listbox(lf, font=("Arial", 11), bd=1, relief="solid"); b1.pack(side="left", fill="both", expand=True, padx=5)
-            b2 = tk.Listbox(lf, font=("Arial", 11), bd=1, relief="solid"); b2.pack(side="left", fill="both", expand=True, padx=5)
+            lf = tk.Frame(f, bg=THEME["bg"]); lf.pack(fill="both", expand=True, padx=10, pady=10)
+            b1 = tk.Listbox(lf, font=("Arial", 11), bg=THEME["bg"], fg=THEME["text"], bd=1, relief="solid"); b1.pack(side="left", fill="both", expand=True, padx=5)
+            b2 = tk.Listbox(lf, font=("Arial", 11), bg=THEME["bg"], fg=THEME["text"], bd=1, relief="solid"); b2.pack(side="left", fill="both", expand=True, padx=5)
             b1.bind("<Double-1>", lambda e, c=cat: self.entry_fav_popup(c)); b2.bind("<Double-1>", lambda e, c=cat: self.entry_fav_popup(c))
-            tk.Button(f, text="Clear Slot", command=lambda c=cat: self.remove_favorite(c)).pack(pady=10)
+            tk.Button(f, text="Clear Slot", bg=THEME["btn"], fg=THEME["text"], command=lambda c=cat: self.remove_favorite(c)).pack(pady=10)
             self.fav_vars[cat] = {"box1": b1, "box2": b2}
         self.update_fav_display()
 
@@ -616,6 +572,401 @@ class MyFavoriteThingsApp(tk.Tk):
                 if r <= 10: self.fav_vars[c]["box1"].insert(tk.END, txt)
                 else: self.fav_vars[c]["box2"].insert(tk.END, txt)
 
+    # ==========================
+    # UI/LOGIC: RADIO
+    # ==========================
+    def init_radio_tab(self):
+        container = tk.Frame(self.radio_tab, bg=THEME["bg"], pady=15); container.pack(fill="both", expand=True, padx=20)
+        tk.Label(container, text="RADIO", font=("Georgia", 24, "bold"), bg=THEME["bg"], fg=THEME["accent"]).pack(pady=(0, 10))
+
+        search_row = tk.Frame(container, bg=THEME["bg"]); search_row.pack(fill="x", pady=(0, 10))
+        self.radio_search_var = tk.StringVar()
+        search_entry = tk.Entry(search_row, textvariable=self.radio_search_var, font=("Segoe UI", 11), bg=THEME["entry_bg"])
+        search_entry.pack(side="left", fill="x", expand=True, padx=(0, 10))
+        search_entry.bind("<Return>", lambda e: self.search_radio())
+        tk.Button(search_row, text="Search", bg=THEME["accent"], fg="white", command=self.search_radio).pack(side="left")
+
+        panes = tk.Frame(container, bg=THEME["bg"]); panes.pack(fill="both", expand=True)
+
+        left = tk.LabelFrame(panes, text=" Search Results ", bg=THEME["bg"], fg=THEME["text"], font=("Arial", 11, "bold"))
+        left.pack(side="left", fill="both", expand=True, padx=(0, 10))
+        self.radio_results_box = tk.Listbox(left, font=("Segoe UI", 10), bg=THEME["bg"], fg=THEME["text"], bd=1, relief="solid")
+        self.radio_results_box.pack(fill="both", expand=True, padx=5, pady=5)
+        tk.Button(left, text="+ Add to My Stations", bg=THEME["accent"], fg="white", command=self.add_radio_station).pack(pady=5)
+
+        right = tk.LabelFrame(panes, text=" My Stations ", bg=THEME["bg"], fg=THEME["text"], font=("Arial", 11, "bold"))
+        right.pack(side="left", fill="both", expand=True, padx=(10, 0))
+        self.radio_my_box = tk.Listbox(right, font=("Segoe UI", 10, "bold"), bg=THEME["bg"], fg=THEME["text"], bd=1, relief="solid")
+        self.radio_my_box.pack(fill="both", expand=True, padx=5, pady=5)
+        self.radio_my_box.bind("<Double-1>", lambda e: self.play_selected_radio())
+        my_btn_row = tk.Frame(right, bg=THEME["bg"]); my_btn_row.pack(pady=5)
+        tk.Button(my_btn_row, text="▶ Play / ⏹ Stop", bg=THEME["accent"], fg="white", command=self.play_selected_radio).pack(side="left", padx=5)
+        tk.Button(my_btn_row, text="Remove", bg=THEME["btn"], fg=THEME["text"], command=self.remove_radio_station).pack(side="left", padx=5)
+
+        self.radio_status = tk.Label(container, text="Nothing playing", font=("Segoe UI", 10), bg=THEME["bg"], fg="gray")
+        self.radio_status.pack(pady=(10, 0))
+
+        self.refresh_my_stations()
+
+    def search_radio(self):
+        query = self.radio_search_var.get().strip()
+        if not query: return
+        self.radio_status.config(text=f"Searching for '{query}'...", fg="blue")
+        def run():
+            try:
+                resp = requests.get(RADIO_SEARCH_API, params={
+                    "name": query, "limit": 25, "hidebroken": "true",
+                    "order": "clickcount", "reverse": "true",
+                }, timeout=10, headers={"User-Agent": "MyFavoriteThingsApp/1.0"})
+                results = resp.json()
+                self.after(0, lambda: self.fill_radio_results(results))
+            except Exception as e:
+                self.after(0, lambda: self.radio_status.config(text=f"Search failed: {e}", fg="red"))
+        threading.Thread(target=run, daemon=True).start()
+
+    def fill_radio_results(self, results):
+        self.radio_search_results = results
+        self.radio_results_box.delete(0, tk.END)
+        for r in results:
+            label = f"{r.get('name', 'Unknown')}  [{r.get('countrycode', '')} {r.get('codec', '')} {r.get('bitrate', '')}kbps]"
+            self.radio_results_box.insert(tk.END, label)
+        self.radio_status.config(text=f"Found {len(results)} station(s)" if results else "No stations found", fg="gray")
+
+    def add_radio_station(self):
+        sel = self.radio_results_box.curselection()
+        if not sel: return
+        r = self.radio_search_results[sel[0]]
+        name, url = r.get("name", "Unknown"), r.get("url_resolved") or r.get("url")
+        if not url: return
+        if any(s["url"] == url for s in self.my_radio_stations):
+            return
+        self.my_radio_stations.append({"name": name, "url": url})
+        self.save_all_data()
+        self.refresh_my_stations()
+
+    def remove_radio_station(self):
+        sel = self.radio_my_box.curselection()
+        if not sel: return
+        station = self.my_radio_stations[sel[0]]
+        if self.radio_playing_name == station["name"]:
+            self.stop_radio()
+        del self.my_radio_stations[sel[0]]
+        self.save_all_data()
+        self.refresh_my_stations()
+
+    def refresh_my_stations(self):
+        self.radio_my_box.delete(0, tk.END)
+        for s in self.my_radio_stations:
+            marker = "▶ " if self.radio_playing_name == s["name"] else "   "
+            self.radio_my_box.insert(tk.END, f"{marker}{s['name']}")
+
+    def play_selected_radio(self):
+        sel = self.radio_my_box.curselection()
+        if not sel: return
+        station = self.my_radio_stations[sel[0]]
+        if self.radio_playing_name == station["name"]:
+            self.stop_radio()
+        else:
+            self.start_radio(station["name"], station["url"])
+
+    def start_radio(self, name, url):
+        self.stop_radio()
+        try:
+            ffplay = os.path.join(BASE_DIR, "ffplay.exe")
+            self.radio_proc = subprocess.Popen([ffplay, "-nodisp", "-autoexit", "-loglevel", "quiet", url],
+                                                creationflags=subprocess.CREATE_NO_WINDOW)
+            self.radio_playing_name = name
+            self.radio_status.config(text=f"Playing: {name}", fg=THEME["accent"])
+            self.refresh_my_stations()
+        except Exception as e:
+            messagebox.showerror("Radio", f"Couldn't start {name}: {e}")
+
+    def stop_radio(self):
+        if self.radio_proc:
+            try: self.radio_proc.terminate()
+            except Exception: pass
+            self.radio_proc = None
+        self.radio_playing_name = None
+        self.radio_status.config(text="Nothing playing", fg="gray")
+        self.refresh_my_stations()
+
+    def stop_all_radio(self):
+        self.stop_radio()
+
+    # ==========================
+    # UI/LOGIC: THEME (fully user-authored - colors + header decoration gifs)
+    # ==========================
+    def init_theme_tab(self):
+        container = tk.Frame(self.theme_tab, bg=THEME["bg"], pady=20); container.pack(fill="both", expand=True, padx=40)
+        tk.Label(container, text="THEME", font=("Georgia", 24, "bold"), bg=THEME["bg"], fg=THEME["accent"]).pack(pady=(0, 20))
+
+        row = tk.Frame(container, bg=THEME["bg"]); row.pack(pady=(0, 20))
+        tk.Label(row, text="Active theme:", font=("Segoe UI", 11, "bold"), bg=THEME["bg"], fg=THEME["text"]).pack(side="left", padx=(0, 10))
+        self.theme_cb = ttk.Combobox(row, values=list(self.themes.keys()), state="readonly", width=25)
+        self.theme_cb.set(self.active_theme_name)
+        self.theme_cb.pack(side="left")
+        self.theme_cb.bind("<<ComboboxSelected>>", lambda e: self.switch_theme(self.theme_cb.get()))
+        tk.Button(row, text="New Theme", bg=THEME["btn"], fg=THEME["text"], command=self.new_theme).pack(side="left", padx=(15, 5))
+        tk.Button(row, text="Rename", bg=THEME["btn"], fg=THEME["text"], command=self.rename_theme).pack(side="left", padx=5)
+        tk.Button(row, text="Delete", bg=THEME["btn"], fg=THEME["text"], command=self.delete_theme).pack(side="left", padx=5)
+
+        colors_frame = tk.LabelFrame(container, text=" Colors ", bg=THEME["bg"], fg=THEME["text"], font=("Arial", 11, "bold"))
+        colors_frame.pack(fill="x", pady=10)
+        self.color_swatches = {}
+        self.pending_colors = dict(self.themes[self.active_theme_name]["colors"])
+        for key in THEME_COLOR_KEYS:
+            r = tk.Frame(colors_frame, bg=THEME["bg"]); r.pack(fill="x", padx=10, pady=5)
+            tk.Label(r, text=key.replace("_", " ").title() + ":", width=12, anchor="w", bg=THEME["bg"], fg=THEME["text"]).pack(side="left")
+            sw = tk.Button(r, width=6, bg=self.pending_colors.get(key, "#ffffff"), command=lambda k=key: self.pick_color(k))
+            sw.pack(side="left")
+            self.color_swatches[key] = sw
+        tk.Button(container, text="Save Colors", bg=THEME["accent"], fg="white", command=self.save_theme_colors).pack(pady=10)
+
+        tk.Label(container, text="Header decorations: click the faint '+' in the header's bottom-right corner to add a gif,\n"
+                                  "or just drag a .gif file (or a gif from a browser tab) onto the header.\n"
+                                  "Drag to move, scroll wheel to resize, right-click to remove.\n"
+                                  "The main header gif (right-click to set) also resizes with the scroll wheel.\n"
+                                  "Shift + scroll wheel on any gif slows down or speeds up all gif animation.\n"
+                                  "The switch in the header's top-right corner flips the active theme into a dark mode\n"
+                                  "derived from its own accent color (Autumn's dark mode stays orange, not plain black).",
+                 font=("Segoe UI", 9), fg="gray", bg=THEME["bg"], justify="center").pack(pady=(20, 0))
+
+    def pick_color(self, key):
+        _, hex_color = colorchooser.askcolor(color=self.pending_colors.get(key, "#ffffff"), title=f"Pick {key} color")
+        if hex_color:
+            self.pending_colors[key] = hex_color
+            self.color_swatches[key].config(bg=hex_color)
+
+    def save_theme_colors(self):
+        self.themes[self.active_theme_name]["colors"] = dict(self.pending_colors)
+        self.save_all_data()
+        self.apply_theme_and_rebuild()
+
+    def new_theme(self):
+        win = tk.Toplevel(self); win.title("New Theme"); win.geometry("320x420")
+        tk.Label(win, text="Start from a color palette:", font=("Segoe UI", 10, "bold")).pack(pady=(10, 5))
+        box = tk.Listbox(win, font=("Segoe UI", 10))
+        for preset_name in THEME_PRESETS: box.insert(tk.END, preset_name)
+        box.selection_set(0)
+        box.pack(fill="both", expand=True, padx=10, pady=5)
+
+        def confirm():
+            sel = box.curselection()
+            preset_name = box.get(sel[0]) if sel else "Blank (current colors)"
+            win.destroy()
+            name = simpledialog.askstring("New Theme", "Name this theme:")
+            if not name or name in self.themes: return
+            base_colors = dict(self.themes[self.active_theme_name]["colors"])
+            base_colors.update(THEME_PRESETS.get(preset_name, {}))
+            self.themes[name] = {"colors": base_colors, "decorations": []}
+            self.active_theme_name = name
+            self.save_all_data()
+            self.theme_cb["values"] = list(self.themes.keys())
+            self.theme_cb.set(name)
+            self.apply_theme_and_rebuild()
+
+        tk.Button(win, text="Next", bg=THEME["accent"], fg="white", command=confirm).pack(pady=10)
+
+    def rename_theme(self):
+        old = self.active_theme_name
+        new = simpledialog.askstring("Rename Theme", "New name:", initialvalue=old)
+        if not new or new == old or new in self.themes: return
+        self.themes[new] = self.themes.pop(old)
+        self.active_theme_name = new
+        self.save_all_data()
+        self.theme_cb["values"] = list(self.themes.keys())
+        self.theme_cb.set(new)
+
+    def delete_theme(self):
+        if len(self.themes) <= 1:
+            messagebox.showwarning("Theme", "You need at least one theme.")
+            return
+        if not messagebox.askyesno("Delete Theme", f"Delete theme '{self.active_theme_name}'?"): return
+        del self.themes[self.active_theme_name]
+        self.active_theme_name = next(iter(self.themes))
+        self.save_all_data()
+        self.apply_theme_and_rebuild()
+
+    def switch_theme(self, name):
+        if name not in self.themes or name == self.active_theme_name: return
+        self.active_theme_name = name
+        self.save_all_data()
+        self.apply_theme_and_rebuild()
+
+    def _apply_active_theme_colors(self):
+        base_colors = self.themes[self.active_theme_name].get("colors", {})
+        colors = make_dark_variant(base_colors) if self.dark_mode else base_colors
+        THEME.update(derive_full_theme(colors))
+
+    def apply_theme_and_rebuild(self):
+        self._apply_active_theme_colors()
+        self.configure(bg=THEME["bg"])
+        self.header_frame.destroy()
+        self.notebook.destroy()
+        self.decoration_widgets = []
+        self.setup_header()
+        self.setup_notebook()
+        self.init_music_tab()
+        self.init_journal_tab()
+        self.init_favorites_tab()
+        self.init_radio_tab()
+        self.init_theme_tab()
+        self.refresh_genres()
+        self.refresh_journals()
+        if self.current_gif_path and os.path.exists(self.current_gif_path):
+            self.load_gif_from_path(self.current_gif_path)
+        self.render_decorations()
+
+    # --- Header decorations (gifs the user adds/drags/resizes) ---
+    def add_decoration(self):
+        path = filedialog.askopenfilename(filetypes=[("GIF", "*.gif")])
+        if path: self.add_decoration_from_path(path, 200, 20)
+
+    def add_decoration_from_path(self, path, x=200, y=20):
+        dec = {"path": path, "x": x, "y": y, "w": 80, "h": 80}
+        self.themes[self.active_theme_name]["decorations"].append(dec)
+        self.save_all_data()
+        self.render_one_decoration(dec)
+
+    def add_decoration_from_url(self, url, x=200, y=20):
+        # Browser drags usually hand over a URL, not the actual file - fetch it ourselves
+        # and save into the app's own gifs folder, same as any other gif the user adds.
+        def run():
+            try:
+                resp = requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
+                resp.raise_for_status()
+                content_type = resp.headers.get("Content-Type", "").lower()
+                content = resp.content
+                final_url = url
+                if "gif" not in content_type and not url.lower().split("?")[0].endswith(".gif"):
+                    # Probably got the page URL, not the raw image (common when dragging from
+                    # an Internet Archive item page) - look inside the page for a .gif link.
+                    if "html" in content_type:
+                        match = re.search(r'(?:src|href)=["\']([^"\']+\.gif[^"\']*)["\']', resp.text, re.IGNORECASE)
+                        if not match:
+                            self.after(0, lambda: messagebox.showwarning(
+                                "Add Gif", "Couldn't find a gif on that page. Try dragging the image itself\n(or opening the gif in its own tab first), not the page link."))
+                            return
+                        final_url = urljoin(url, match.group(1))
+                        resp2 = requests.get(final_url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
+                        resp2.raise_for_status()
+                        content = resp2.content
+                    else:
+                        self.after(0, lambda: messagebox.showwarning("Add Gif", "That link doesn't look like a gif."))
+                        return
+                gifs_dir = os.path.join(DATA_DIR, "gifs")
+                os.makedirs(gifs_dir, exist_ok=True)
+                filename = os.path.basename(final_url.split("?")[0]) or "dropped.gif"
+                if not filename.lower().endswith(".gif"): filename += ".gif"
+                local_path = os.path.join(gifs_dir, filename)
+                base, ext = os.path.splitext(local_path)
+                counter = 1
+                while os.path.exists(local_path):
+                    local_path = f"{base}_{counter}{ext}"; counter += 1
+                with open(local_path, "wb") as f: f.write(content)
+                self.after(0, lambda: self.add_decoration_from_path(local_path, x, y))
+            except Exception as e:
+                self.after(0, lambda err=e: messagebox.showerror("Add Gif", f"Couldn't fetch that image: {err}"))
+        threading.Thread(target=run, daemon=True).start()
+
+    def on_gif_drop(self, event):
+        try:
+            items = self.tk.splitlist(event.data)
+        except Exception:
+            items = [event.data]
+        header_x = self.header_frame.winfo_rootx()
+        header_w = max(1, self.header_frame.winfo_width())
+        x = max(0, min(event.x_root - header_x, header_w - 80))
+        for item in items:
+            item = item.strip()
+            if item.lower().startswith(("http://", "https://")):
+                self.add_decoration_from_url(item, x, 20)
+            elif os.path.isfile(item) and item.lower().endswith(".gif"):
+                self.add_decoration_from_path(item, x, 20)
+            x = max(0, min(x + 20, header_w - 80))
+
+    def render_decorations(self):
+        for d in self.decoration_widgets:
+            try: d["label"].destroy()
+            except Exception: pass
+        self.decoration_widgets = []
+        for dec in self.themes[self.active_theme_name]["decorations"]:
+            self.render_one_decoration(dec)
+
+    def render_one_decoration(self, dec):
+        try:
+            img = Image.open(dec["path"])
+            pil_frames, durations = [], []
+            for frame in ImageSequence.Iterator(img):
+                durations.append(frame.info.get("duration", 100) or 100)
+                pil_frames.append(frame.convert("RGBA"))
+        except Exception:
+            return
+        entry = {"pil_frames": pil_frames, "durations": durations, "frames": [], "idx": 0, "record": dec, "label": None}
+        self.rescale_decoration_frames(entry)
+        label = tk.Label(self.header_frame, bd=0, bg=THEME["bg"])
+        label.place(x=dec["x"], y=dec["y"], width=dec["w"], height=dec["h"])
+        label.config(image=entry["frames"][0])
+        entry["label"] = label
+        label.bind("<ButtonPress-1>", lambda e, en=entry: self._dec_drag_start(e, en))
+        label.bind("<B1-Motion>", lambda e, en=entry: self._dec_drag_move(e, en))
+        label.bind("<ButtonRelease-1>", lambda e, en=entry: self.save_all_data())
+        label.bind("<MouseWheel>", lambda e, en=entry: self._dec_resize(e, en))
+        label.bind("<Shift-MouseWheel>", self.adjust_gif_speed)
+        label.bind("<Button-3>", lambda e, en=entry: self._dec_remove(en))
+        self.decoration_widgets.append(entry)
+        self.animate_one_decoration(entry)
+
+    def rescale_decoration_frames(self, entry):
+        w, h = entry["record"]["w"], entry["record"]["h"]
+        entry["frames"] = [ImageTk.PhotoImage(f.resize((w, h), Image.LANCZOS)) for f in entry["pil_frames"]]
+
+    def animate_one_decoration(self, entry):
+        if entry not in self.decoration_widgets or not entry["frames"]: return
+        try: entry["label"].config(image=entry["frames"][entry["idx"]])
+        except Exception: return
+        delay = max(20, int(entry["durations"][entry["idx"]] * self.gif_speed))
+        entry["idx"] = (entry["idx"] + 1) % len(entry["frames"])
+        self.after(delay, lambda: self.animate_one_decoration(entry))
+
+    def adjust_gif_speed(self, event):
+        delta = 0.25 if event.delta > 0 else -0.25
+        self.gif_speed = max(0.25, min(8.0, self.gif_speed + delta))
+        self.save_all_data()
+
+    def _dec_drag_start(self, event, entry):
+        entry["drag_offset"] = (event.x, event.y)
+
+    def _dec_drag_move(self, event, entry):
+        ox, oy = entry.get("drag_offset", (0, 0))
+        new_x = entry["label"].winfo_x() + (event.x - ox)
+        new_y = entry["label"].winfo_y() + (event.y - oy)
+        max_x = max(0, self.header_frame.winfo_width() - entry["record"]["w"])
+        max_y = max(0, self.header_frame.winfo_height() - entry["record"]["h"])
+        new_x = max(0, min(new_x, max_x))
+        new_y = max(0, min(new_y, max_y))
+        entry["label"].place(x=new_x, y=new_y)
+        entry["record"]["x"], entry["record"]["y"] = new_x, new_y
+
+    def _dec_resize(self, event, entry):
+        delta = 10 if event.delta > 0 else -10
+        new_w = max(24, min(300, entry["record"]["w"] + delta))
+        new_h = max(24, min(300, entry["record"]["h"] + delta))
+        entry["record"]["w"], entry["record"]["h"] = new_w, new_h
+        self.rescale_decoration_frames(entry)
+        entry["idx"] = entry["idx"] % len(entry["frames"])
+        entry["label"].place(width=new_w, height=new_h)
+        entry["label"].config(image=entry["frames"][entry["idx"]])
+        self.save_all_data()
+
+    def _dec_remove(self, entry):
+        if not messagebox.askyesno("Remove Decoration", "Remove this gif from the header?"): return
+        try: self.themes[self.active_theme_name]["decorations"].remove(entry["record"])
+        except ValueError: pass
+        entry["label"].destroy()
+        if entry in self.decoration_widgets: self.decoration_widgets.remove(entry)
+        self.save_all_data()
+
     def set_volume(self, val): pygame.mixer.music.set_volume(float(val))
     def pause_music(self): pygame.mixer.music.pause(); self.is_paused = True
     def resume_music(self): pygame.mixer.music.unpause(); self.is_paused = False
@@ -641,22 +992,69 @@ class MyFavoriteThingsApp(tk.Tk):
             if pygame.mixer.music.get_pos() == -1: self.skip_song()
         self.after(1000, self.check_music_end)
     def setup_header(self):
-        self.header_frame = tk.Frame(self, bg=THEME["bg"], height=70); self.header_frame.pack(fill="x", side="top")
+        self.header_frame = tk.Frame(self, bg=THEME["bg"], height=150); self.header_frame.pack(fill="x", side="top"); self.header_frame.pack_propagate(False)
         self.clock_label = tk.Label(self.header_frame, font=self.clock_font, bg=THEME["bg"], fg=THEME["accent"]); self.clock_label.place(relx=0.5, rely=0.5, anchor="center")
         self.cat_label = tk.Label(self.header_frame, bg=THEME["bg"]); self.cat_label.pack(side="left", padx=15); self.cat_label.bind("<Button-3>", lambda e: self.set_header_gif())
+        self.cat_label.bind("<MouseWheel>", self.resize_header_gif)
+        self.cat_label.bind("<Shift-MouseWheel>", self.adjust_gif_speed)
+        tk.Button(self.header_frame, text="+", font=("Segoe UI", 9), fg="#bbbbbb", bg=THEME["bg"], bd=0,
+                  activeforeground=THEME["accent"], command=self.add_decoration).place(relx=1.0, rely=1.0, anchor="se", x=-6, y=-4)
+        self.build_light_switch()
     def setup_notebook(self):
         self.notebook = ttk.Notebook(self); self.notebook.pack(fill="both", expand=True, padx=10, pady=5)
-        self.music_tab = tk.Frame(self.notebook, bg=THEME["bg"]); self.dl_tab = tk.Frame(self.notebook, bg=THEME["bg"]); self.journal_tab = tk.Frame(self.notebook, bg=THEME["bg"]); self.favorites_tab = tk.Frame(self.notebook, bg=THEME["bg"])
-        self.notebook.add(self.music_tab, text=" 🎵 MUSIC "); self.notebook.add(self.dl_tab, text=" ⬇️ DOWNLOADER "); self.notebook.add(self.journal_tab, text=" 📝 JOURNAL "); self.notebook.add(self.favorites_tab, text=" ⭐ FAVORITES ")
+        self.music_tab = tk.Frame(self.notebook, bg=THEME["bg"]); self.journal_tab = tk.Frame(self.notebook, bg=THEME["bg"]); self.favorites_tab = tk.Frame(self.notebook, bg=THEME["bg"]); self.radio_tab = tk.Frame(self.notebook, bg=THEME["bg"]); self.theme_tab = tk.Frame(self.notebook, bg=THEME["bg"])
+        self.notebook.add(self.music_tab, text=" 🎵 MUSIC "); self.notebook.add(self.journal_tab, text=" 📝 JOURNAL "); self.notebook.add(self.favorites_tab, text=" ⭐ FAVORITES "); self.notebook.add(self.radio_tab, text=" 📻 RADIO "); self.notebook.add(self.theme_tab, text=" 🎨 THEME ")
     def load_gif_from_path(self, path):
+        if self.gif_after_id:
+            self.after_cancel(self.gif_after_id); self.gif_after_id = None
         try:
-            img = Image.open(path); self.gif_frames = [ImageTk.PhotoImage(f.convert("RGBA").resize((60, 60))) for f in ImageSequence.Iterator(img)]; self.gif_idx = 0; self.animate_gif()
+            img = Image.open(path)
+            self.gif_pil_frames, self.gif_durations = [], []
+            for frame in ImageSequence.Iterator(img):
+                self.gif_durations.append(frame.info.get("duration", 100) or 100)
+                self.gif_pil_frames.append(frame.convert("RGBA"))
+            self.gif_frames = [ImageTk.PhotoImage(f.resize((self.gif_size, self.gif_size))) for f in self.gif_pil_frames]
+            self.gif_idx = 0; self.animate_gif()
         except: pass
     def animate_gif(self):
-        if self.gif_frames: self.cat_label.config(image=self.gif_frames[self.gif_idx]); self.gif_idx = (self.gif_idx + 1) % len(self.gif_frames); self.after(100, self.animate_gif)
+        if self.gif_frames:
+            self.cat_label.config(image=self.gif_frames[self.gif_idx])
+            delay = max(20, int(self.gif_durations[self.gif_idx] * self.gif_speed))
+            self.gif_idx = (self.gif_idx + 1) % len(self.gif_frames)
+            self.gif_after_id = self.after(delay, self.animate_gif)
     def set_header_gif(self):
-        p = filedialog.askopenfilename(filetypes=[("GIF", "*.gif")]); 
+        p = filedialog.askopenfilename(filetypes=[("GIF", "*.gif")]);
         if p: self.current_gif_path = p; self.load_gif_from_path(p)
+    def resize_header_gif(self, event):
+        if not self.gif_pil_frames: return
+        delta = 10 if event.delta > 0 else -10
+        self.gif_size = max(24, min(140, self.gif_size + delta))
+        self.gif_frames = [ImageTk.PhotoImage(f.resize((self.gif_size, self.gif_size))) for f in self.gif_pil_frames]
+        self.gif_idx = self.gif_idx % len(self.gif_frames)
+        self.cat_label.config(image=self.gif_frames[self.gif_idx])
+        self.save_all_data()
+
+    # --- Light/Dark switch (a literal switch graphic in the header corner) ---
+    def build_light_switch(self):
+        self.switch_canvas = tk.Canvas(self.header_frame, width=34, height=54, bg=THEME["bg"], highlightthickness=0)
+        self.switch_canvas.place(relx=1.0, rely=0.0, anchor="ne", x=-14, y=8)
+        self.switch_canvas.bind("<Button-1>", lambda e: self.toggle_light_switch())
+        self.draw_light_switch()
+
+    def draw_light_switch(self):
+        c = self.switch_canvas
+        c.delete("all")
+        is_dark = self.dark_mode
+        plate = "#3a3a3a" if is_dark else "#dcdcdc"
+        c.create_rectangle(2, 2, 32, 52, fill=plate, outline="#888888", width=2)
+        knob_y = 28 if is_dark else 4
+        c.create_rectangle(6, knob_y, 28, knob_y + 20, fill=("#5566aa" if is_dark else "#f5d76e"), outline="black")
+        c.create_text(17, 40 if is_dark else 14, text=("🌙" if is_dark else "☀"), font=("Segoe UI", 9))
+
+    def toggle_light_switch(self):
+        self.dark_mode = not self.dark_mode
+        self.save_all_data()
+        self.apply_theme_and_rebuild()
 
 if __name__ == "__main__":
     app = MyFavoriteThingsApp()
