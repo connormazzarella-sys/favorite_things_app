@@ -78,6 +78,7 @@ body {
   padding: 4px 7px;
   cursor: pointer;
 }
+.card-actions button[data-offline].active { background: #34a853; color: white; }
 
 .song-list { list-style: none; padding: 0; }
 .song-list li {

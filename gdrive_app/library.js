@@ -1,4 +1,4 @@
-const libState = { genreId: null, genreName: null, albumId: null, albumName: null, artist: "", songs: [], songIdx: -1, shuffle: false };
+const libState = { genreId: null, genreName: null, albumId: null, albumName: null, artist: "", songs: [], songIdx: -1, shuffle: false, isOfflineAlbum: false };
 
 function cleanSongTitle(filename, artist) {
   let title = filename.replace(/\.(mp3|m4a)$/i, "");
@@ -13,7 +13,8 @@ function cleanSongTitle(filename, artist) {
 function showLibView(name) {
   ["genre", "album", "song"].forEach((v) => (el(`lib-${v}View`).hidden = v !== name));
   el("libBackBtn").hidden = name === "genre";
-  el("libAddBtn").hidden = name === "song";
+  // Can't add anything to Drive while offline, regardless of which view this is.
+  el("libAddBtn").hidden = name === "song" || isOfflineMode;
 }
 
 el("libBackBtn").addEventListener("click", () => {
@@ -322,6 +323,7 @@ async function openGenre(genreId, genreName) {
     const card = document.createElement("div");
     card.className = "album-card";
     card.innerHTML = `<div class="card-actions">
+        <button data-offline title="Download for offline">&#11015;</button>
         <button data-edit title="Rename">&#9998;</button>
         <button data-del title="Delete">&#128465;</button>
       </div>
@@ -351,6 +353,52 @@ async function deleteAlbum(folder, title) {
   if (!confirm(`Delete "${title}" and all its songs?\n\nThis moves it to your Google Drive trash, so it's recoverable there for 30 days.`)) return;
   await deleteFile(folder.id);
   openGenre(libState.genreId, libState.genreName);
+}
+
+function setOfflineButtonState(btn, downloaded) {
+  btn.disabled = false;
+  btn.dataset.state = downloaded ? "downloaded" : "not-downloaded";
+  btn.innerHTML = downloaded ? "&#10003;" : "&#11015;";
+  btn.title = downloaded ? "Downloaded for offline use (tap to remove)" : "Download for offline";
+  btn.classList.toggle("active", downloaded);
+}
+
+// Pulls every song + the cover down from Drive and stores them in the
+// browser's own local IndexedDB (see offline-db.js), so this album can be
+// browsed and played later with no internet connection at all.
+async function downloadAlbumForOffline(folder, title, artist) {
+  const files = await listChildren(folder.id, false);
+  const songFiles = files.filter(isAudioFile);
+  const songs = [];
+  for (const f of songFiles) {
+    songs.push({ id: f.id, name: f.name, blob: await fetchFileBlob(f.id) });
+  }
+  const coverEntry = await findFirstExistingChild(folder.id, COVER_FILENAME_PRIORITY);
+  const coverBlob = coverEntry ? await fetchFileBlob(coverEntry.id) : null;
+  await saveAlbumOffline({ id: libState.genreId, name: libState.genreName }, { id: folder.id, title, artist }, songs, coverBlob);
+}
+
+function wireOfflineButton(btn, folder, title, artist) {
+  btn.onclick = async (e) => {
+    e.stopPropagation();
+    if (btn.dataset.state === "downloaded") {
+      if (!confirm(`Remove "${title}" from offline downloads?\n\nIt stays in your Google Drive library - this only frees up space on this device.`)) return;
+      await removeAlbumOffline(folder.id);
+      setOfflineButtonState(btn, false);
+      return;
+    }
+    btn.disabled = true;
+    btn.textContent = "…";
+    try {
+      await downloadAlbumForOffline(folder, title, artist);
+      setOfflineButtonState(btn, true);
+    } catch (err) {
+      console.error(err);
+      alert("Couldn't download this album for offline use - see console.");
+      setOfflineButtonState(btn, false);
+    }
+  };
+  isAlbumOffline(folder.id).then((downloaded) => setOfflineButtonState(btn, downloaded));
 }
 
 // Lets you drop more MP3/M4A files (loose, or inside a folder) straight
@@ -396,6 +444,7 @@ async function loadAlbumCardMeta(folder, card) {
   card.onclick = () => openAlbum(folder.id, folder.name, title, artist);
   card.querySelector("[data-edit]").onclick = (e) => { e.stopPropagation(); renameAlbum(folder, title, artist); };
   card.querySelector("[data-del]").onclick = (e) => { e.stopPropagation(); deleteAlbum(folder, title); };
+  wireOfflineButton(card.querySelector("[data-offline]"), folder, title, artist);
 
   const cover = await findFirstExistingChild(folder.id, COVER_FILENAME_PRIORITY);
   if (cover) {
@@ -426,6 +475,7 @@ async function loadAlbumCardMeta(folder, card) {
 async function openAlbum(albumId, folderName, title, artist) {
   libState.albumId = albumId;
   libState.artist = artist;
+  libState.isOfflineAlbum = false;
   el("topTitle").textContent = title;
   const files = await listChildren(albumId, false);
   libState.songs = files.filter((f) => /\.(mp3|m4a)$/i.test(f.name));
@@ -442,16 +492,71 @@ function renderSongList() {
   }
   libState.songs.forEach((file, idx) => {
     const li = document.createElement("li");
-    li.innerHTML = `<span class="track-name">${cleanSongTitle(file.name, libState.artist)}</span>
-      <span><button data-dl>Download</button><button data-del>Delete</button></span>`;
+    if (libState.isOfflineAlbum) {
+      // No Download/Delete here - both act on the Drive copy, which isn't
+      // reachable while offline, and don't make sense for the local one.
+      li.innerHTML = `<span class="track-name">${cleanSongTitle(file.name, libState.artist)}</span>`;
+    } else {
+      li.innerHTML = `<span class="track-name">${cleanSongTitle(file.name, libState.artist)}</span>
+        <span><button data-dl>Download</button><button data-del>Delete</button></span>`;
+      li.querySelector("[data-dl]").onclick = async () => {
+        const blob = await fetchFileBlob(file.id);
+        triggerBrowserDownload(blob, file.name);
+      };
+      li.querySelector("[data-del]").onclick = () => deleteSong(idx);
+    }
     li.querySelector(".track-name").onclick = () => playSong(idx);
-    li.querySelector("[data-dl]").onclick = async () => {
-      const blob = await fetchFileBlob(file.id);
-      triggerBrowserDownload(blob, file.name);
-    };
-    li.querySelector("[data-del]").onclick = () => deleteSong(idx);
     list.appendChild(li);
   });
+}
+
+// ---------- Offline library (browsed from IndexedDB, no Drive/network) ----------
+async function loadOfflineGenres() {
+  const genres = await listOfflineGenres();
+  const list = el("genreList");
+  list.innerHTML = "";
+  if (!genres.length) {
+    list.innerHTML = "<li>No offline downloads yet. While connected, open an album and tap the &#11015; icon to make it available offline.</li>";
+    return;
+  }
+  genres.forEach((g) => {
+    const li = document.createElement("li");
+    li.className = "genre-row";
+    li.innerHTML = `<button class="genre-name">${g.name.toUpperCase()}</button>`;
+    li.querySelector(".genre-name").onclick = () => openOfflineGenre(g.id, g.name);
+    list.appendChild(li);
+  });
+}
+
+async function openOfflineGenre(genreId, genreName) {
+  libState.genreId = genreId;
+  libState.genreName = genreName;
+  el("topTitle").textContent = genreName.toUpperCase() + " (offline)";
+  const albums = await listOfflineAlbums(genreId);
+  const grid = el("albumGrid");
+  grid.innerHTML = "";
+  if (!albums.length) grid.innerHTML = "<p class='hint'>No offline albums in this genre.</p>";
+  for (const album of albums) {
+    const card = document.createElement("div");
+    card.className = "album-card";
+    card.innerHTML = `<img alt=""><div class="title">${album.title}</div><div class="artist">${album.artist}</div>`;
+    card.onclick = () => openOfflineAlbum(album.id, album.title, album.artist);
+    grid.appendChild(card);
+    getOfflineCover(album.id).then((cover) => {
+      card.querySelector("img").src = cover ? URL.createObjectURL(cover.blob) : noCoverDataUrl();
+    });
+  }
+  showLibView("album");
+}
+
+async function openOfflineAlbum(albumId, title, artist) {
+  libState.albumId = albumId;
+  libState.artist = artist;
+  libState.isOfflineAlbum = true;
+  el("topTitle").textContent = title + " (offline)";
+  libState.songs = await listOfflineSongs(albumId);
+  renderSongList();
+  showLibView("song");
 }
 
 async function deleteSong(idx) {
@@ -472,7 +577,7 @@ async function playSong(idx) {
   el("nowPlayingTitle").textContent = "Loading...";
   el("player").hidden = false;
   try {
-    const blob = await fetchFileBlob(file.id);
+    const blob = file.blob || (await fetchFileBlob(file.id));
     const audio = el("audio");
     if (audio.dataset.blobUrl) URL.revokeObjectURL(audio.dataset.blobUrl);
     const url = URL.createObjectURL(blob);

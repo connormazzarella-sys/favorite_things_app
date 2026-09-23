@@ -4,6 +4,8 @@ let tokenClient = null;
 let accessToken = null;
 let gapiReady = false;
 let refreshTimer = null;
+let isOfflineMode = false;
+let authResolved = false;
 
 // Folder IDs, resolved once at sign-in and reused everywhere.
 const driveIds = { root: null, music: null };
@@ -26,6 +28,11 @@ function initTokenClient() {
     client_id: CLIENT_ID,
     scope: SCOPE,
     callback: async (tokenResponse) => {
+      authResolved = true;
+      // We may have already fallen back to offline mode (see initAuth's
+      // timeout) by the time a slow request finally comes back - ignore it
+      // rather than yanking the UI out of offline mode mid-use.
+      if (isOfflineMode) return;
       if (tokenResponse.error) {
         // A silent auto-attempt failing just means "not currently signed
         // in" (first visit, or fully logged out of Google) - that's the
@@ -77,8 +84,44 @@ function login() {
   tokenClient.requestAccessToken();
 }
 
+// Shown when there's no way to reach Google at all (offline at load time,
+// the auth scripts failed to load, or sign-in just never came back within
+// a few seconds) - falls back to whatever's already been downloaded for
+// offline use instead of leaving the user stuck on the sign-in screen.
+function enterOfflineMode() {
+  if (isOfflineMode) return;
+  isOfflineMode = true;
+  el("loginBtn").hidden = true;
+  el("userLabel").textContent = "Offline (tap to reconnect)";
+  el("userLabel").style.cursor = "pointer";
+  el("userLabel").onclick = () => location.reload();
+  el("app").hidden = false;
+  onOfflineMode(); // defined in main.js
+}
+
 (async function initAuth() {
-  await loadGapiClient();
+  // main.js (which defines onOfflineMode/onSignedIn) is a later <script>
+  // tag that hasn't run yet at this point - deferring even the "no network
+  // at all" fast path to a fresh macrotask guarantees every script has
+  // finished executing first (a microtask isn't enough: Chromium drains
+  // the microtask queue between individual <script> tags, not just after
+  // all of them), exactly like the online path already gets for free by
+  // only calling onSignedIn() from an async network callback.
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  if (!navigator.onLine) return enterOfflineMode();
+
+  // If nothing resolves (success, failure, or a thrown error below) within
+  // a few seconds, assume the network is unreachable even though the OS
+  // thinks it's connected (captive portal, dead wifi, etc.) and fall back.
+  setTimeout(() => { if (!authResolved) enterOfflineMode(); }, 7000);
+
+  try {
+    await loadGapiClient();
+  } catch (err) {
+    authResolved = true;
+    return enterOfflineMode();
+  }
   initTokenClient();
   attemptSilentSignIn();
 })();
