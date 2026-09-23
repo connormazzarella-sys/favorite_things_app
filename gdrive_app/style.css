@@ -109,9 +109,11 @@ body {
   padding: 10px 16px 12px;
   z-index: 20;
 }
-#nowPlaying { text-align: center; margin-bottom: 6px; }
-#nowPlayingTitle { font-weight: 700; font-size: 14px; }
-#nowPlayingArtist { font-size: 12px; color: #777; margin-top: 2px; }
+#nowPlaying { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
+#nowPlayingArt { width: 48px; height: 48px; border-radius: 6px; object-fit: cover; flex-shrink: 0; background: #e5e5e5; }
+#nowPlayingText { flex: 1; min-width: 0; }
+#nowPlayingTitle { font-weight: 700; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#nowPlayingArtist { font-size: 12px; color: #777; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 #audio { width: 100%; }
 .player-controls { display: flex; justify-content: center; align-items: center; gap: 24px; margin-top: 8px; }
 

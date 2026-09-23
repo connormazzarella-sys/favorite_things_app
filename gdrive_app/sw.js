@@ -2,7 +2,7 @@
 // Deliberately does NOT touch cross-origin requests (Google auth/API
 // scripts, the Drive API, radio streams) - those need to be live or fail
 // naturally; only our own static files get cached.
-const CACHE_NAME = "ft-app-shell-v2";
+const CACHE_NAME = "ft-app-shell-v3";
 const APP_SHELL = [
   "/",
   "/index.html",

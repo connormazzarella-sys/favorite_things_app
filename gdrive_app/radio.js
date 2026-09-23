@@ -93,6 +93,27 @@ function playStation(name, url) {
   ra.hidden = false;
   ra.play();
   el("radioStatus").textContent = `Playing: ${name}`;
+  showStationInMediaSession(name);
+}
+
+// Station name in the phone's media controls; track skipping doesn't apply
+// to a live stream, so those buttons are switched off until an album plays.
+function showStationInMediaSession(name) {
+  if (!("mediaSession" in navigator)) return;
+  const ms = navigator.mediaSession;
+  ms.metadata = new MediaMetadata({
+    title: name,
+    artist: "Radio",
+    artwork: [
+      { src: "icons/icon-192.png", sizes: "192x192", type: "image/png" },
+      { src: "icons/icon-512.png", sizes: "512x512", type: "image/png" },
+    ],
+  });
+  const ra = el("radioAudio");
+  const handlers = { play: () => ra.play(), pause: () => ra.pause(), previoustrack: null, nexttrack: null, seekto: null, seekbackward: null, seekforward: null };
+  for (const [action, handler] of Object.entries(handlers)) {
+    try { ms.setActionHandler(action, handler); } catch { /* unsupported action */ }
+  }
 }
 
 el("radioSearchBtn").addEventListener("click", searchRadio);

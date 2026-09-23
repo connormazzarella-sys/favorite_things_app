@@ -1,4 +1,4 @@
-const libState = { genreId: null, genreName: null, albumId: null, albumName: null, artist: "", songs: [], songIdx: -1, shuffle: false, isOfflineAlbum: false };
+const libState = { genreId: null, genreName: null, albumId: null, albumName: null, albumTitle: "", artist: "", songs: [], songIdx: -1, shuffle: false, isOfflineAlbum: false };
 
 function cleanSongTitle(filename, artist) {
   let title = filename.replace(/\.(mp3|m4a)$/i, "");
@@ -472,6 +472,7 @@ async function loadAlbumCardMeta(folder, card) {
   const cover = await findFirstExistingChild(folder.id, COVER_FILENAME_PRIORITY);
   if (cover) {
     const blob = await fetchFileBlob(cover.id);
+    albumCoverBlobs.set(folder.id, blob);
     card.querySelector("img").src = URL.createObjectURL(blob);
     return;
   }
@@ -497,6 +498,7 @@ async function loadAlbumCardMeta(folder, card) {
 
 async function openAlbum(albumId, folderName, title, artist) {
   libState.albumId = albumId;
+  libState.albumTitle = title;
   libState.artist = artist;
   libState.isOfflineAlbum = false;
   el("topTitle").textContent = title;
@@ -528,9 +530,10 @@ function renderSongList() {
       };
       li.querySelector("[data-del]").onclick = () => deleteSong(idx);
     }
-    li.querySelector(".track-name").onclick = () => playSong(idx);
+    li.querySelector(".track-name").onclick = () => startAlbumPlayback(idx);
     list.appendChild(li);
   });
+  highlightPlayingRow();
 }
 
 // ---------- Offline library (browsed from IndexedDB, no Drive/network) ----------
@@ -575,6 +578,7 @@ async function openOfflineGenre(genreId, genreName) {
 
 async function openOfflineAlbum(albumId, title, artist) {
   libState.albumId = albumId;
+  libState.albumTitle = title;
   libState.artist = artist;
   libState.isOfflineAlbum = true;
   el("topTitle").textContent = title + " (offline)";
@@ -588,50 +592,275 @@ async function deleteSong(idx) {
   if (!confirm(`Delete "${cleanSongTitle(file.name, libState.artist)}"?\n\nThis moves it to your Google Drive trash, so it's recoverable there for 30 days.`)) return;
   await deleteFile(file.id);
   libState.songs.splice(idx, 1);
-  if (libState.songIdx === idx) { el("audio").pause(); el("player").hidden = true; libState.songIdx = -1; }
-  else if (libState.songIdx > idx) libState.songIdx--;
+  const queueIdx = queue ? queue.songs.findIndex((s) => s.id === file.id) : -1;
+  if (queueIdx !== -1) {
+    queue.songs.splice(queueIdx, 1);
+    prefetched = null;
+    if (libState.songIdx === queueIdx) stopAlbumPlayback();
+    else {
+      if (libState.songIdx > queueIdx) libState.songIdx--;
+      prefetchNext();
+    }
+  }
   renderSongList();
 }
 
-async function playSong(idx) {
-  if (idx < 0 || idx >= libState.songs.length) return;
-  stopRadio();
-  libState.songIdx = idx;
-  const file = libState.songs[idx];
-  el("nowPlayingTitle").textContent = "Loading...";
-  el("player").hidden = false;
-  try {
-    const blob = file.blob || (await fetchFileBlob(file.id));
-    const audio = el("audio");
-    if (audio.dataset.blobUrl) URL.revokeObjectURL(audio.dataset.blobUrl);
-    const url = URL.createObjectURL(blob);
-    audio.dataset.blobUrl = url;
-    audio.src = url;
-    audio.play();
-    el("nowPlayingTitle").textContent = cleanSongTitle(file.name, libState.artist);
-    el("nowPlayingArtist").textContent = libState.artist || "";
-    document.querySelectorAll(".song-row, #songList li").forEach((r, i) => r.classList.toggle("playing", i === idx));
-  } catch (err) {
-    console.error(err);
-    el("nowPlayingTitle").textContent = "Couldn't play that track.";
+// ---------- Player ----------
+// The album that's actually playing, snapshotted when a track is tapped -
+// kept apart from libState.songs (whatever album is on screen) so browsing
+// to a different album doesn't hijack Next or auto-advance.
+let queue = null; // { albumId, title, artist, isOffline, songs }
+// The following track, downloaded while the current one plays, so the
+// switch on "ended" is instant. Matters most with the screen off: Android
+// can freeze a background page's network requests once audio stops, so a
+// track that only starts downloading after the last one ends may never
+// arrive - which is exactly how playback used to stall between songs.
+let prefetched = null; // { idx, promise }
+let playToken = 0; // bumped per playSong() so a slow, superseded load can't clobber a newer one
+const albumCoverBlobs = new Map(); // albumId -> cover Blob, filled as album cards load
+
+function startAlbumPlayback(idx) {
+  queue = {
+    albumId: libState.albumId,
+    title: libState.albumTitle,
+    artist: libState.artist,
+    isOffline: libState.isOfflineAlbum,
+    songs: [...libState.songs],
+  };
+  prefetched = null;
+  playSong(idx);
+}
+
+function stopAlbumPlayback() {
+  playToken++;
+  el("audio").pause();
+  el("player").hidden = true;
+  libState.songIdx = -1;
+  prefetched = null;
+  highlightPlayingRow();
+  if ("mediaSession" in navigator) {
+    navigator.mediaSession.metadata = null;
+    navigator.mediaSession.playbackState = "none";
   }
 }
 
+function highlightPlayingRow() {
+  const current = queue && libState.songIdx >= 0 ? queue.songs[libState.songIdx] : null;
+  document.querySelectorAll("#songList li").forEach((row, i) => {
+    const song = libState.songs[i];
+    row.classList.toggle("playing", !!(current && song && song.id === current.id));
+  });
+}
+
+function songBlobFor(idx) {
+  if (prefetched && prefetched.idx === idx) {
+    const { promise } = prefetched;
+    prefetched = null;
+    // If the early download failed (e.g. a network blip), just try again now.
+    return promise.catch(() => fetchSongBlob(queue.songs[idx]));
+  }
+  return fetchSongBlob(queue.songs[idx]);
+}
+
+function fetchSongBlob(file) {
+  return file.blob ? Promise.resolve(file.blob) : fetchFileBlob(file.id);
+}
+
+// Where the queue goes after the current track: -1 means "end of album".
+function pickNextIdx() {
+  const count = queue.songs.length;
+  if (libState.shuffle) {
+    if (count < 2) return 0;
+    let idx;
+    do idx = Math.floor(Math.random() * count); while (idx === libState.songIdx);
+    return idx;
+  }
+  return libState.songIdx + 1 < count ? libState.songIdx + 1 : -1;
+}
+
+function prefetchNext() {
+  if (!queue || libState.songIdx < 0) return;
+  const idx = pickNextIdx();
+  if (idx === -1) { prefetched = null; return; }
+  const promise = fetchSongBlob(queue.songs[idx]);
+  promise.catch(() => {}); // failures are retried in songBlobFor()
+  prefetched = { idx, promise };
+}
+
+async function playSong(idx) {
+  if (!queue || idx < 0 || idx >= queue.songs.length) return;
+  stopRadio();
+  const token = ++playToken;
+  libState.songIdx = idx;
+  const file = queue.songs[idx];
+  const title = cleanSongTitle(file.name, queue.artist);
+  el("nowPlayingTitle").textContent = "Loading...";
+  el("player").hidden = false;
+  highlightPlayingRow();
+  setAlbumMediaHandlers();
+  // Show the track in the phone's media controls straight away, before the
+  // download finishes - artwork gets filled in once it's been found.
+  setNowPlaying(title, queue.artist, null);
+  try {
+    const blob = await songBlobFor(idx);
+    if (token !== playToken) return;
+    const audio = el("audio");
+    const oldUrl = audio.dataset.blobUrl;
+    const url = URL.createObjectURL(blob);
+    audio.dataset.blobUrl = url;
+    audio.src = url;
+    if (oldUrl) URL.revokeObjectURL(oldUrl);
+    audio.play().catch((err) => console.warn("Playback didn't start automatically:", err));
+    el("nowPlayingTitle").textContent = title;
+    prefetchNext();
+    loadNowPlayingArt(blob, title, token);
+  } catch (err) {
+    console.error(err);
+    if (token === playToken) el("nowPlayingTitle").textContent = "Couldn't play that track.";
+  }
+}
+
+// Artwork: the track's own embedded cover first, then the album's cover
+// image, then the app icon.
+async function loadNowPlayingArt(songBlob, title, token) {
+  const tags = await readAudioTags(songBlob);
+  if (token !== playToken) return;
+  const artist = (tags && tags.artist) || queue.artist;
+  let artBlob = tags && tags.picture ? tags.picture.blob : null;
+  if (!artBlob) artBlob = await albumCoverBlob(queue);
+  const artUrl = artBlob ? await artworkDataUrl(artBlob) : null;
+  if (token !== playToken) return;
+  setNowPlaying(title, artist, artUrl);
+}
+
+async function albumCoverBlob(album) {
+  if (albumCoverBlobs.has(album.albumId)) return albumCoverBlobs.get(album.albumId);
+  let blob = null;
+  try {
+    if (album.isOffline) {
+      const cover = await getOfflineCover(album.albumId);
+      blob = cover ? cover.blob : null;
+    } else {
+      const entry = await findFirstExistingChild(album.albumId, COVER_FILENAME_PRIORITY);
+      blob = entry ? await fetchFileBlob(entry.id) : null;
+    }
+  } catch (err) {
+    console.warn("Couldn't load album cover:", err);
+  }
+  albumCoverBlobs.set(album.albumId, blob);
+  return blob;
+}
+
+// Scaled down to a 512px JPEG data URL - small enough for the OS media
+// controls to take reliably, and unlike a blob: URL it stays valid however
+// long the notification sticks around.
+async function artworkDataUrl(blob) {
+  try {
+    const img = await createImageBitmap(blob);
+    const scale = Math.min(1, 512 / Math.max(img.width, img.height));
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.round(img.width * scale);
+    canvas.height = Math.round(img.height * scale);
+    canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
+    return canvas.toDataURL("image/jpeg", 0.85);
+  } catch (err) {
+    console.warn("Couldn't read cover image:", err);
+    return null;
+  }
+}
+
+function setNowPlaying(title, artist, artUrl) {
+  el("nowPlayingArtist").textContent = artist || "";
+  el("nowPlayingArt").src = artUrl || "icons/icon-192.png";
+  if (!("mediaSession" in navigator)) return;
+  navigator.mediaSession.metadata = new MediaMetadata({
+    title,
+    artist: artist || "",
+    album: queue ? queue.title : "",
+    artwork: artUrl
+      ? [{ src: artUrl, sizes: "512x512", type: "image/jpeg" }]
+      : [
+          { src: "icons/icon-192.png", sizes: "192x192", type: "image/png" },
+          { src: "icons/icon-512.png", sizes: "512x512", type: "image/png" },
+        ],
+  });
+}
+
+// Wires the phone's lock-screen / notification buttons to this player.
+// Re-applied on every track since the radio swaps in its own handlers.
+function setAlbumMediaHandlers() {
+  if (!("mediaSession" in navigator)) return;
+  const audio = el("audio");
+  const handlers = {
+    play: () => audio.play(),
+    pause: () => audio.pause(),
+    previoustrack: prevSong,
+    nexttrack: nextSong,
+    seekto: (d) => { audio.currentTime = d.seekTime; },
+    seekbackward: (d) => { audio.currentTime = Math.max(0, audio.currentTime - (d.seekOffset || 10)); },
+    seekforward: (d) => { audio.currentTime = Math.min(audio.duration || 0, audio.currentTime + (d.seekOffset || 10)); },
+  };
+  for (const [action, handler] of Object.entries(handlers)) {
+    try { navigator.mediaSession.setActionHandler(action, handler); } catch { /* unsupported action */ }
+  }
+}
+
+function updatePositionState() {
+  const audio = el("audio");
+  if (!("mediaSession" in navigator) || !navigator.mediaSession.setPositionState) return;
+  if (!isFinite(audio.duration) || audio.duration <= 0) return;
+  try {
+    navigator.mediaSession.setPositionState({
+      duration: audio.duration,
+      playbackRate: audio.playbackRate,
+      position: Math.min(audio.currentTime, audio.duration),
+    });
+  } catch { /* ignore out-of-range glitches */ }
+}
+
 function nextSong() {
-  if (!libState.songs.length) return;
-  const idx = libState.shuffle ? Math.floor(Math.random() * libState.songs.length) : (libState.songIdx + 1) % libState.songs.length;
-  playSong(idx);
+  if (!queue || !queue.songs.length) return;
+  if (prefetched) return playSong(prefetched.idx);
+  const idx = pickNextIdx();
+  playSong(idx === -1 ? 0 : idx); // tapping Next on the last track wraps to the first
 }
 function prevSong() {
-  if (!libState.songs.length) return;
-  playSong((libState.songIdx - 1 + libState.songs.length) % libState.songs.length);
+  if (!queue || !queue.songs.length) return;
+  const audio = el("audio");
+  // Like most players: a few seconds in, "previous" restarts the track.
+  if (audio.currentTime > 3) { audio.currentTime = 0; return; }
+  playSong((libState.songIdx - 1 + queue.songs.length) % queue.songs.length);
 }
+
+function onTrackEnded() {
+  if (!queue) return;
+  // Auto-advance through the album, stopping after its last track.
+  if (!prefetched && pickNextIdx() === -1) {
+    if ("mediaSession" in navigator) navigator.mediaSession.playbackState = "paused";
+    return;
+  }
+  nextSong();
+}
+
 el("nextBtn").addEventListener("click", nextSong);
 el("prevBtn").addEventListener("click", prevSong);
-el("audio").addEventListener("ended", nextSong);
+const audioEl = el("audio");
+audioEl.addEventListener("ended", onTrackEnded);
+audioEl.addEventListener("play", () => {
+  if ("mediaSession" in navigator) navigator.mediaSession.playbackState = "playing";
+  updatePositionState();
+});
+audioEl.addEventListener("pause", () => {
+  if ("mediaSession" in navigator && !audioEl.ended) navigator.mediaSession.playbackState = "paused";
+  updatePositionState();
+});
+["loadedmetadata", "seeked", "ratechange"].forEach((evt) => audioEl.addEventListener(evt, updatePositionState));
 el("shuffleBtn").addEventListener("click", () => {
   libState.shuffle = !libState.shuffle;
   el("shuffleBtn").innerHTML = `🔀 ${libState.shuffle ? "ON" : "OFF"}`;
+  // The queued-up next track was picked under the old mode.
+  prefetched = null;
+  prefetchNext();
 });
 
 // ---------- Add Album modal ----------
