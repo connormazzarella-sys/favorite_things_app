@@ -2,6 +2,7 @@ const libState = { genreId: null, genreName: null, albumId: null, albumName: nul
 
 function cleanSongTitle(filename, artist) {
   let title = filename.replace(/\.(mp3|m4a)$/i, "");
+  title = title.replace(/^\d+\s*[-.]\s*/, ""); // strip a leading track-number prefix like "01 - "
   if (artist) {
     const escaped = artist.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     title = title.replace(new RegExp(`^${escaped}\\s*[-–—]\\s*`, "i"), "");
@@ -66,19 +67,19 @@ function readAllDirEntries(dirEntry) {
     })();
   });
 }
-async function collectAudioFiles(entry) {
-  if (entry.isFile) {
-    const file = await entryToFile(entry);
-    return /\.(mp3|m4a)$/i.test(file.name) ? [file] : [];
-  }
+async function collectAllFiles(entry) {
+  if (entry.isFile) return [await entryToFile(entry)];
   if (entry.isDirectory) {
     const children = await readAllDirEntries(entry);
     let files = [];
-    for (const child of children) files = files.concat(await collectAudioFiles(child));
+    for (const child of children) files = files.concat(await collectAllFiles(child));
     return files;
   }
   return [];
 }
+const isAudioFile = (file) => /\.(mp3|m4a)$/i.test(file.name);
+const isCoverImageFile = (file) => /^cover\.(jpe?g|png|webp)$/i.test(file.name);
+
 // getAsEntry() must be called synchronously inside the drop handler
 // (before any await), so this pulls entries out first thing.
 function entriesFromDrop(dataTransfer) {
@@ -86,14 +87,83 @@ function entriesFromDrop(dataTransfer) {
     .map((item) => (item.webkitGetAsEntry ? item.webkitGetAsEntry() : null))
     .filter(Boolean);
 }
-async function createAlbumFromFiles(genreId, albumName, files) {
-  const albumId = await findOrCreateChild(genreId, albumName, true);
-  const existingMeta = await findChildByName(albumId, "metadata.json");
-  if (!existingMeta) {
-    await uploadNewFile(albumId, "metadata.json", new Blob([JSON.stringify({ title: albumName, artist: "Unknown Artist" })]), "application/json");
+
+// Reads embedded ID3/MP4 tags (title, artist, album, track #, cover art)
+// straight out of an audio File in the browser - resolves null on anything
+// unreadable/untagged rather than rejecting, since tags are best-effort.
+function readAudioTags(file) {
+  return new Promise((resolve) => {
+    if (typeof jsmediatags === "undefined") return resolve(null);
+    jsmediatags.read(file, {
+      onSuccess: ({ tags }) => {
+        let picture = null;
+        if (tags.picture) {
+          const bytes = new Uint8Array(tags.picture.data);
+          const ext = (tags.picture.format || "image/jpeg").split("/")[1] || "jpg";
+          picture = { blob: new Blob([bytes], { type: tags.picture.format }), ext };
+        }
+        resolve({
+          title: tags.title || null,
+          artist: tags.artist || null,
+          album: tags.album || null,
+          track: tags.track ? parseInt(tags.track, 10) : null,
+          picture,
+        });
+      },
+      onError: () => resolve(null),
+    });
+  });
+}
+
+function sanitizeForFilename(name) {
+  return name.replace(/[\\/:*?"<>|]/g, "").trim();
+}
+
+// Uploads one song, preferring its own embedded title/track-number (renamed
+// to "01 - Title.mp3" so Drive's name-sort keeps album order and the on
+// screen title comes out clean) over its original OS filename.
+async function uploadAudioFileWithTags(albumId, file, tagsOverride) {
+  const tags = tagsOverride !== undefined ? tagsOverride : await readAudioTags(file);
+  const ext = (file.name.match(/\.(\w+)$/) || [, "mp3"])[1];
+  let uploadName = file.name;
+  if (tags && tags.title) {
+    const trackPrefix = tags.track ? String(tags.track).padStart(2, "0") + " - " : "";
+    uploadName = `${trackPrefix}${sanitizeForFilename(tags.title)}.${ext}`;
   }
-  for (const file of files) {
-    await uploadNewFile(albumId, file.name, file, file.type || "audio/mpeg");
+  await uploadNewFile(albumId, uploadName, file, file.type || "audio/mpeg");
+  return tags;
+}
+
+// Creates a new album from a dropped folder's contents: album title/artist
+// come from the first track's ID3 tags (falling back to the folder name /
+// "Unknown Artist"), the cover comes from a "cover.*" file in the folder or
+// else the first track's embedded art, and each song is uploaded via
+// uploadAudioFileWithTags so titles/order come from tags too.
+async function createAlbumFromFolderFiles(genreId, folderName, audioFiles, coverFile) {
+  el("topTitle").textContent = `Reading tags for "${folderName}"...`;
+  const firstTags = audioFiles.length ? await readAudioTags(audioFiles[0]) : null;
+  const albumTitle = (firstTags && firstTags.album) || folderName;
+  const albumArtist = (firstTags && firstTags.artist) || "Unknown Artist";
+
+  const albumId = await findOrCreateChild(genreId, folderName, true);
+  const existingMeta = await findChildByName(albumId, "metadata.json");
+  const metaData = { title: albumTitle, artist: albumArtist };
+  if (existingMeta) await saveJsonFile(existingMeta.id, metaData);
+  else await uploadNewFile(albumId, "metadata.json", new Blob([JSON.stringify(metaData)]), "application/json");
+
+  let coverBlob = coverFile;
+  let coverExt = coverFile ? (coverFile.name.match(/\.(\w+)$/) || [, "jpg"])[1] : "jpg";
+  if (!coverBlob && firstTags && firstTags.picture) {
+    coverBlob = firstTags.picture.blob;
+    coverExt = firstTags.picture.ext;
+  }
+  if (coverBlob && !(await findChildByName(albumId, `cover.${coverExt}`))) {
+    await uploadNewFile(albumId, `cover.${coverExt}`, coverBlob, coverBlob.type || `image/${coverExt}`);
+  }
+
+  for (let i = 0; i < audioFiles.length; i++) {
+    el("topTitle").textContent = `Uploading ${i + 1}/${audioFiles.length}...`;
+    await uploadAudioFileWithTags(albumId, audioFiles[i], i === 0 ? firstTags : undefined);
   }
 }
 
@@ -111,9 +181,11 @@ function wireGenreDropTarget(row, folder) {
     const folderEntries = entries.filter((en) => en.isDirectory);
     if (folderEntries.length) {
       for (const folderEntry of folderEntries) {
-        el("topTitle").textContent = `Adding "${folderEntry.name}"...`;
-        const audioFiles = await collectAudioFiles(folderEntry);
-        if (audioFiles.length) await createAlbumFromFiles(folder.id, folderEntry.name, audioFiles);
+        el("topTitle").textContent = `Reading "${folderEntry.name}"...`;
+        const allFiles = await collectAllFiles(folderEntry);
+        const audioFiles = allFiles.filter(isAudioFile);
+        const coverFile = allFiles.find(isCoverImageFile);
+        if (audioFiles.length) await createAlbumFromFolderFiles(folder.id, folderEntry.name, audioFiles, coverFile);
       }
       openGenre(folder.id, folder.name);
       return;
@@ -219,13 +291,16 @@ function wireAlbumDropTarget(card, folder) {
     const entries = entriesFromDrop(e.dataTransfer);
     let audioFiles = [];
     if (entries.length) {
-      for (const entry of entries) audioFiles = audioFiles.concat(await collectAudioFiles(entry));
+      let allFiles = [];
+      for (const entry of entries) allFiles = allFiles.concat(await collectAllFiles(entry));
+      audioFiles = allFiles.filter(isAudioFile);
     } else {
-      audioFiles = [...e.dataTransfer.files].filter((f) => /\.(mp3|m4a)$/i.test(f.name));
+      audioFiles = [...e.dataTransfer.files].filter(isAudioFile);
     }
     if (!audioFiles.length) return;
-    for (const file of audioFiles) {
-      await uploadNewFile(folder.id, file.name, file, file.type || "audio/mpeg");
+    for (let i = 0; i < audioFiles.length; i++) {
+      el("topTitle").textContent = `Uploading ${i + 1}/${audioFiles.length}...`;
+      await uploadAudioFileWithTags(folder.id, audioFiles[i]);
     }
     openGenre(libState.genreId, libState.genreName);
   });
