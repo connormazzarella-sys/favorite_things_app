@@ -78,7 +78,51 @@ async function collectAllFiles(entry) {
   return [];
 }
 const isAudioFile = (file) => /\.(mp3|m4a)$/i.test(file.name);
-const isCoverImageFile = (file) => /^cover\.(jpe?g|png|webp)$/i.test(file.name);
+
+// Same priority order the original desktop app used for local cover files
+// (cover.jpg/png before album.jpg/folder.jpg), extended with jpeg/webp.
+const COVER_FILENAME_PRIORITY = ["cover.jpg", "cover.png", "cover.jpeg", "cover.webp", "album.jpg", "folder.jpg"];
+function findCoverFileAmong(files) {
+  for (const name of COVER_FILENAME_PRIORITY) {
+    const match = files.find((f) => f.name.toLowerCase() === name);
+    if (match) return match;
+  }
+  return null;
+}
+async function findFirstExistingChild(parentId, names) {
+  for (const name of names) {
+    const found = await findChildByName(parentId, name);
+    if (found) return found;
+  }
+  return null;
+}
+
+// Same fallback order the original desktop app's get_embedded_art() used:
+// scan every track's ID3 art (not just the first) until one is found.
+async function findEmbeddedCoverAmongTags(tagsList) {
+  const withPicture = tagsList.find((t) => t && t.picture);
+  return withPicture ? withPicture.picture : null;
+}
+
+let __noCoverDataUrl = null;
+function noCoverDataUrl() {
+  if (__noCoverDataUrl) return __noCoverDataUrl;
+  const canvas = document.createElement("canvas");
+  canvas.width = 150;
+  canvas.height = 150;
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = "#ccc";
+  ctx.fillRect(0, 0, 150, 150);
+  ctx.strokeStyle = "#fff";
+  ctx.lineWidth = 2;
+  ctx.strokeRect(5, 5, 140, 140);
+  ctx.fillStyle = "#fff";
+  ctx.font = "bold 14px sans-serif";
+  ctx.textAlign = "center";
+  ctx.fillText("NO COVER", 75, 79);
+  __noCoverDataUrl = canvas.toDataURL();
+  return __noCoverDataUrl;
+}
 
 // getAsEntry() must be called synchronously inside the drop handler
 // (before any await), so this pulls entries out first thing.
@@ -136,12 +180,16 @@ async function uploadAudioFileWithTags(albumId, file, tagsOverride) {
 
 // Creates a new album from a dropped folder's contents: album title/artist
 // come from the first track's ID3 tags (falling back to the folder name /
-// "Unknown Artist"), the cover comes from a "cover.*" file in the folder or
-// else the first track's embedded art, and each song is uploaded via
-// uploadAudioFileWithTags so titles/order come from tags too.
+// "Unknown Artist"), the cover follows the original desktop app's own
+// fallback order (a cover/album/folder image file in the folder, else the
+// first embedded ID3 picture found across ALL tracks, else a generated
+// placeholder), and each song is uploaded via uploadAudioFileWithTags so
+// titles/order come from tags too.
 async function createAlbumFromFolderFiles(genreId, folderName, audioFiles, coverFile) {
   el("topTitle").textContent = `Reading tags for "${folderName}"...`;
-  const firstTags = audioFiles.length ? await readAudioTags(audioFiles[0]) : null;
+  const allTags = [];
+  for (const file of audioFiles) allTags.push(await readAudioTags(file));
+  const firstTags = allTags[0] || null;
   const albumTitle = (firstTags && firstTags.album) || folderName;
   const albumArtist = (firstTags && firstTags.artist) || "Unknown Artist";
 
@@ -153,9 +201,9 @@ async function createAlbumFromFolderFiles(genreId, folderName, audioFiles, cover
 
   let coverBlob = coverFile;
   let coverExt = coverFile ? (coverFile.name.match(/\.(\w+)$/) || [, "jpg"])[1] : "jpg";
-  if (!coverBlob && firstTags && firstTags.picture) {
-    coverBlob = firstTags.picture.blob;
-    coverExt = firstTags.picture.ext;
+  if (!coverBlob) {
+    const picture = await findEmbeddedCoverAmongTags(allTags);
+    if (picture) { coverBlob = picture.blob; coverExt = picture.ext; }
   }
   if (coverBlob && !(await findChildByName(albumId, `cover.${coverExt}`))) {
     await uploadNewFile(albumId, `cover.${coverExt}`, coverBlob, coverBlob.type || `image/${coverExt}`);
@@ -163,57 +211,80 @@ async function createAlbumFromFolderFiles(genreId, folderName, audioFiles, cover
 
   for (let i = 0; i < audioFiles.length; i++) {
     el("topTitle").textContent = `Uploading ${i + 1}/${audioFiles.length}...`;
-    await uploadAudioFileWithTags(albumId, audioFiles[i], i === 0 ? firstTags : undefined);
+    await uploadAudioFileWithTags(albumId, audioFiles[i], allTags[i]);
   }
 }
 
-// Drops onto a genre tile: a dropped FOLDER becomes a new album automatically
-// (named after the folder, songs uploaded straight in) - loose MP3/M4A files
-// dropped directly (not inside a folder) open the Add Album modal instead,
+// Shared by both drop zones that create albums in a genre: a genre-list row
+// (genre not yet open) and the album grid itself (once you're inside a
+// genre). A dropped FOLDER becomes a new album automatically (named after
+// the folder, songs uploaded straight in) - loose MP3/M4A files dropped
+// directly (not inside a folder) open the Add Album modal instead,
 // pre-filled, so the user just has to name the album and confirm.
+async function handleGenreLevelDrop(dataTransfer, genreId, genreName) {
+  const entries = entriesFromDrop(dataTransfer);
+  const folderEntries = entries.filter((en) => en.isDirectory);
+  if (folderEntries.length) {
+    for (const folderEntry of folderEntries) {
+      el("topTitle").textContent = `Reading "${folderEntry.name}"...`;
+      const allFiles = await collectAllFiles(folderEntry);
+      const audioFiles = allFiles.filter(isAudioFile);
+      const coverFile = findCoverFileAmong(allFiles);
+      if (audioFiles.length) await createAlbumFromFolderFiles(genreId, folderEntry.name, audioFiles, coverFile);
+    }
+    openGenre(genreId, genreName);
+    return;
+  }
+
+  // webkitGetAsEntry() isn't guaranteed everywhere (e.g. some non-Chromium
+  // browsers) - fall back to the plain FileList so loose-file drops still
+  // work even when it's unavailable and entries came back empty.
+  let looseFiles;
+  if (entries.length) {
+    looseFiles = [];
+    for (const en of entries.filter((en) => en.isFile)) {
+      const file = await entryToFile(en);
+      if (isAudioFile(file)) looseFiles.push(file);
+    }
+  } else {
+    looseFiles = [...dataTransfer.files].filter(isAudioFile);
+  }
+  if (!looseFiles.length) return;
+  libState.genreId = genreId;
+  libState.genreName = genreName;
+  openAddAlbumModal();
+  const dt = new DataTransfer();
+  looseFiles.forEach((f) => dt.items.add(f));
+  el("albumSongFiles").files = dt.files;
+  el("albumNameInput").focus();
+}
+
 function wireGenreDropTarget(row, folder) {
   row.addEventListener("dragover", (e) => { e.preventDefault(); row.classList.add("drag-over"); });
   row.addEventListener("dragleave", () => row.classList.remove("drag-over"));
   row.addEventListener("drop", async (e) => {
     e.preventDefault();
     row.classList.remove("drag-over");
-    const entries = entriesFromDrop(e.dataTransfer);
-    const folderEntries = entries.filter((en) => en.isDirectory);
-    if (folderEntries.length) {
-      for (const folderEntry of folderEntries) {
-        el("topTitle").textContent = `Reading "${folderEntry.name}"...`;
-        const allFiles = await collectAllFiles(folderEntry);
-        const audioFiles = allFiles.filter(isAudioFile);
-        const coverFile = allFiles.find(isCoverImageFile);
-        if (audioFiles.length) await createAlbumFromFolderFiles(folder.id, folderEntry.name, audioFiles, coverFile);
-      }
-      openGenre(folder.id, folder.name);
-      return;
-    }
-
-    // webkitGetAsEntry() isn't guaranteed everywhere (e.g. some non-Chromium
-    // browsers) - fall back to the plain FileList so loose-file drops still
-    // work even when it's unavailable and entries came back empty.
-    let looseFiles;
-    if (entries.length) {
-      looseFiles = [];
-      for (const en of entries.filter((en) => en.isFile)) {
-        const file = await entryToFile(en);
-        if (/\.(mp3|m4a)$/i.test(file.name)) looseFiles.push(file);
-      }
-    } else {
-      looseFiles = [...e.dataTransfer.files].filter((f) => /\.(mp3|m4a)$/i.test(f.name));
-    }
-    if (!looseFiles.length) return;
-    libState.genreId = folder.id;
-    libState.genreName = folder.name;
-    openAddAlbumModal();
-    const dt = new DataTransfer();
-    looseFiles.forEach((f) => dt.items.add(f));
-    el("albumSongFiles").files = dt.files;
-    el("albumNameInput").focus();
+    await handleGenreLevelDrop(e.dataTransfer, folder.id, folder.name);
   });
 }
+
+// Lets you drop a folder/files anywhere in the album grid while you're
+// already inside a genre, not just from the genre-list screen. Wired once
+// (not per openGenre() call, since #lib-albumView is a persistent element)
+// and reads the currently-open genre live at drop time.
+function wireGenreViewDropZone() {
+  const view = el("lib-albumView");
+  view.addEventListener("dragover", (e) => { e.preventDefault(); view.classList.add("drag-over"); });
+  view.addEventListener("dragleave", () => view.classList.remove("drag-over"));
+  view.addEventListener("drop", async (e) => {
+    e.preventDefault();
+    view.classList.remove("drag-over");
+    if (!libState.genreId) return;
+    await handleGenreLevelDrop(e.dataTransfer, libState.genreId, libState.genreName);
+  });
+}
+wireGenreViewDropZone();
 
 async function loadGenres() {
   const folders = await listChildren(driveIds.music, true);
@@ -244,6 +315,9 @@ async function openGenre(genreId, genreName) {
   const albumFolders = await listChildren(genreId, true);
   const grid = el("albumGrid");
   grid.innerHTML = "";
+  if (!albumFolders.length) {
+    grid.innerHTML = "<p class='hint'>No albums in this genre yet - drag a folder of songs in here, or tap + to add one.</p>";
+  }
   for (const folder of albumFolders) {
     const card = document.createElement("div");
     card.className = "album-card";
@@ -283,10 +357,13 @@ async function deleteAlbum(folder, title) {
 // onto an existing album's cover to add them to that album, without
 // opening the Add Album modal.
 function wireAlbumDropTarget(card, folder) {
-  card.addEventListener("dragover", (e) => { e.preventDefault(); card.classList.add("drag-over"); });
-  card.addEventListener("dragleave", () => card.classList.remove("drag-over"));
+  // stopPropagation so a drop on a specific card (add to THIS album) doesn't
+  // also bubble up and trigger the album-grid's "create a new album" zone.
+  card.addEventListener("dragover", (e) => { e.preventDefault(); e.stopPropagation(); card.classList.add("drag-over"); });
+  card.addEventListener("dragleave", (e) => { e.stopPropagation(); card.classList.remove("drag-over"); });
   card.addEventListener("drop", async (e) => {
     e.preventDefault();
+    e.stopPropagation();
     card.classList.remove("drag-over");
     const entries = entriesFromDrop(e.dataTransfer);
     let audioFiles = [];
@@ -320,11 +397,30 @@ async function loadAlbumCardMeta(folder, card) {
   card.querySelector("[data-edit]").onclick = (e) => { e.stopPropagation(); renameAlbum(folder, title, artist); };
   card.querySelector("[data-del]").onclick = (e) => { e.stopPropagation(); deleteAlbum(folder, title); };
 
-  const cover = await findChildByName(folder.id, "cover.jpg") || await findChildByName(folder.id, "cover.png");
+  const cover = await findFirstExistingChild(folder.id, COVER_FILENAME_PRIORITY);
   if (cover) {
     const blob = await fetchFileBlob(cover.id);
     card.querySelector("img").src = URL.createObjectURL(blob);
+    return;
   }
+
+  // No cover file at all - same last-resort fallback the original desktop
+  // app used: pull embedded ID3 art from a track. Bounded to the first
+  // track only (unlike the original, which scanned every local file for
+  // free) since here it costs a real download - and once found, save it
+  // back as cover.jpg so this album never has to pay that cost again.
+  const songs = await listChildren(folder.id, false);
+  const firstSong = songs.find(isAudioFile);
+  if (firstSong) {
+    const blob = await fetchFileBlob(firstSong.id);
+    const tags = await readAudioTags(blob);
+    if (tags && tags.picture) {
+      card.querySelector("img").src = URL.createObjectURL(tags.picture.blob);
+      uploadNewFile(folder.id, `cover.${tags.picture.ext}`, tags.picture.blob, tags.picture.blob.type || `image/${tags.picture.ext}`);
+      return;
+    }
+  }
+  card.querySelector("img").src = noCoverDataUrl();
 }
 
 async function openAlbum(albumId, folderName, title, artist) {
@@ -430,13 +526,26 @@ el("albumUploadForm").addEventListener("submit", async (e) => {
     statusEl.textContent = "Creating album...";
     const albumId = await findOrCreateChild(libState.genreId, albumName, true);
     await uploadNewFile(albumId, "metadata.json", new Blob([JSON.stringify({ title: albumName, artist })]), "application/json");
-    if (coverFile) {
-      statusEl.textContent = "Uploading cover...";
-      await uploadNewFile(albumId, "cover.jpg", coverFile, coverFile.type || "image/jpeg");
+
+    let coverBlob = coverFile;
+    let coverExt = coverFile ? (coverFile.name.match(/\.(\w+)$/) || [, "jpg"])[1] : "jpg";
+    if (!coverBlob) {
+      // No cover picked - fall back to embedded ID3 art, same as the
+      // original desktop app: scan every selected track until one's found.
+      statusEl.textContent = "Checking for embedded cover art...";
+      for (const file of files) {
+        const tags = await readAudioTags(file);
+        if (tags && tags.picture) { coverBlob = tags.picture.blob; coverExt = tags.picture.ext; break; }
+      }
     }
+    if (coverBlob) {
+      statusEl.textContent = "Uploading cover...";
+      await uploadNewFile(albumId, `cover.${coverExt}`, coverBlob, coverBlob.type || `image/${coverExt}`);
+    }
+
     for (let i = 0; i < files.length; i++) {
       statusEl.textContent = `Uploading ${i + 1}/${files.length}...`;
-      await uploadNewFile(albumId, files[i].name, files[i], files[i].type || "audio/mpeg");
+      await uploadAudioFileWithTags(albumId, files[i]);
     }
     el("addAlbumModal").hidden = true;
     openGenre(libState.genreId, libState.genreName);
