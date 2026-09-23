@@ -2,7 +2,7 @@
 // Deliberately does NOT touch cross-origin requests (Google auth/API
 // scripts, the Drive API, radio streams) - those need to be live or fail
 // naturally; only our own static files get cached.
-const CACHE_NAME = "ft-app-shell-v1";
+const CACHE_NAME = "ft-app-shell-v2";
 const APP_SHELL = [
   "/",
   "/index.html",
@@ -36,18 +36,20 @@ self.addEventListener("fetch", (event) => {
   if (url.origin !== self.location.origin) return;
   if (event.request.method !== "GET") return;
 
+  // Network-first: an online visit always gets the latest deployed files
+  // (and refreshes the cache), so a new deploy shows up immediately instead
+  // of being masked by a stale cached copy. Only falls back to whatever's
+  // cached when the network genuinely isn't reachable - true offline use.
   event.respondWith(
-    caches.match(event.request).then((cached) => {
-      const network = fetch(event.request)
-        .then((resp) => {
-          const copy = resp.clone();
-          caches.open(CACHE_NAME).then((cache) => cache.put(event.request, copy));
-          return resp;
-        })
-        .catch(() => cached);
-      // Serve the cached shell instantly when we have it, refreshing it in
-      // the background - falls through to the network on a first visit.
-      return cached || network;
-    })
+    // cache: "no-store" bypasses the browser's own HTTP cache too - without
+    // it, a plain fetch() can quietly resolve from disk cache and mask a
+    // fresh deploy exactly like the service worker cache itself could.
+    fetch(event.request, { cache: "no-store" })
+      .then((resp) => {
+        const copy = resp.clone();
+        caches.open(CACHE_NAME).then((cache) => cache.put(event.request, copy));
+        return resp;
+      })
+      .catch(() => caches.match(event.request))
   );
 });
