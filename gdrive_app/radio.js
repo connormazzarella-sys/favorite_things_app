@@ -57,6 +57,14 @@ async function removeStation(idx) {
   renderSavedStations();
 }
 
+async function renameStation(idx) {
+  const newName = prompt("Rename station:", myStations[idx].name);
+  if (!newName || !newName.trim()) return;
+  myStations[idx].name = newName.trim();
+  await saveJsonFile(radioStationsFileId, myStations);
+  renderSavedStations();
+}
+
 function renderSavedStations() {
   const box = el("radioSaved");
   box.innerHTML = "";
@@ -68,8 +76,9 @@ function renderSavedStations() {
     const row = document.createElement("div");
     row.className = "radio-row";
     row.innerHTML = `<span>${s.name}</span>
-      <span><button data-play>&#9654;</button><button data-remove>&times;</button></span>`;
+      <span><button data-play>&#9654;</button><button data-edit>&#9998;</button><button data-remove>&times;</button></span>`;
     row.querySelector("[data-play]").onclick = () => playStation(s.name, s.url);
+    row.querySelector("[data-edit]").onclick = () => renameStation(idx);
     row.querySelector("[data-remove]").onclick = () => removeStation(idx);
     box.appendChild(row);
   });

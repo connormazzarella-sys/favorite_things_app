@@ -34,6 +34,115 @@ async function addGenre(name) {
   loadGenres();
 }
 
+async function renameGenre(folderId, currentName) {
+  const newName = prompt("Rename genre:", currentName);
+  if (!newName || !newName.trim() || newName.trim() === currentName) return;
+  await renameFile(folderId, newName.trim());
+  loadGenres();
+}
+
+async function deleteGenre(folderId, name) {
+  if (!confirm(`Delete "${name}" and everything inside it?\n\nThis moves it to your Google Drive trash, so it's recoverable there for 30 days.`)) return;
+  await deleteFile(folderId);
+  loadGenres();
+}
+
+// Windows/macOS file managers hand a dropped folder over as a
+// FileSystemDirectoryEntry, not a plain File - this walks it (and any
+// dropped loose file) down to a flat list of actual File objects.
+function entryToFile(entry) {
+  return new Promise((resolve) => entry.file(resolve));
+}
+function readAllDirEntries(dirEntry) {
+  return new Promise((resolve) => {
+    const reader = dirEntry.createReader();
+    let all = [];
+    (function readBatch() {
+      reader.readEntries((entries) => {
+        if (!entries.length) return resolve(all);
+        all = all.concat(entries);
+        readBatch();
+      });
+    })();
+  });
+}
+async function collectAudioFiles(entry) {
+  if (entry.isFile) {
+    const file = await entryToFile(entry);
+    return /\.(mp3|m4a)$/i.test(file.name) ? [file] : [];
+  }
+  if (entry.isDirectory) {
+    const children = await readAllDirEntries(entry);
+    let files = [];
+    for (const child of children) files = files.concat(await collectAudioFiles(child));
+    return files;
+  }
+  return [];
+}
+// getAsEntry() must be called synchronously inside the drop handler
+// (before any await), so this pulls entries out first thing.
+function entriesFromDrop(dataTransfer) {
+  return [...dataTransfer.items]
+    .map((item) => (item.webkitGetAsEntry ? item.webkitGetAsEntry() : null))
+    .filter(Boolean);
+}
+async function createAlbumFromFiles(genreId, albumName, files) {
+  const albumId = await findOrCreateChild(genreId, albumName, true);
+  const existingMeta = await findChildByName(albumId, "metadata.json");
+  if (!existingMeta) {
+    await uploadNewFile(albumId, "metadata.json", new Blob([JSON.stringify({ title: albumName, artist: "Unknown Artist" })]), "application/json");
+  }
+  for (const file of files) {
+    await uploadNewFile(albumId, file.name, file, file.type || "audio/mpeg");
+  }
+}
+
+// Drops onto a genre tile: a dropped FOLDER becomes a new album automatically
+// (named after the folder, songs uploaded straight in) - loose MP3/M4A files
+// dropped directly (not inside a folder) open the Add Album modal instead,
+// pre-filled, so the user just has to name the album and confirm.
+function wireGenreDropTarget(row, folder) {
+  row.addEventListener("dragover", (e) => { e.preventDefault(); row.classList.add("drag-over"); });
+  row.addEventListener("dragleave", () => row.classList.remove("drag-over"));
+  row.addEventListener("drop", async (e) => {
+    e.preventDefault();
+    row.classList.remove("drag-over");
+    const entries = entriesFromDrop(e.dataTransfer);
+    const folderEntries = entries.filter((en) => en.isDirectory);
+    if (folderEntries.length) {
+      for (const folderEntry of folderEntries) {
+        el("topTitle").textContent = `Adding "${folderEntry.name}"...`;
+        const audioFiles = await collectAudioFiles(folderEntry);
+        if (audioFiles.length) await createAlbumFromFiles(folder.id, folderEntry.name, audioFiles);
+      }
+      openGenre(folder.id, folder.name);
+      return;
+    }
+
+    // webkitGetAsEntry() isn't guaranteed everywhere (e.g. some non-Chromium
+    // browsers) - fall back to the plain FileList so loose-file drops still
+    // work even when it's unavailable and entries came back empty.
+    let looseFiles;
+    if (entries.length) {
+      looseFiles = [];
+      for (const en of entries.filter((en) => en.isFile)) {
+        const file = await entryToFile(en);
+        if (/\.(mp3|m4a)$/i.test(file.name)) looseFiles.push(file);
+      }
+    } else {
+      looseFiles = [...e.dataTransfer.files].filter((f) => /\.(mp3|m4a)$/i.test(f.name));
+    }
+    if (!looseFiles.length) return;
+    libState.genreId = folder.id;
+    libState.genreName = folder.name;
+    openAddAlbumModal();
+    const dt = new DataTransfer();
+    looseFiles.forEach((f) => dt.items.add(f));
+    el("albumSongFiles").files = dt.files;
+    el("albumNameInput").focus();
+  });
+}
+
 async function loadGenres() {
   const folders = await listChildren(driveIds.music, true);
   const list = el("genreList");
@@ -43,10 +152,16 @@ async function loadGenres() {
     return;
   }
   folders.forEach((f) => {
-    const btn = document.createElement("button");
-    btn.textContent = f.name.toUpperCase();
-    btn.onclick = () => openGenre(f.id, f.name);
-    list.appendChild(btn);
+    const li = document.createElement("li");
+    li.className = "genre-row";
+    li.innerHTML = `<button class="genre-name">${f.name.toUpperCase()}</button>
+      <button class="icon-sm" data-edit title="Rename">&#9998;</button>
+      <button class="icon-sm danger" data-del title="Delete">&#128465;</button>`;
+    li.querySelector(".genre-name").onclick = () => openGenre(f.id, f.name);
+    li.querySelector("[data-edit]").onclick = () => renameGenre(f.id, f.name);
+    li.querySelector("[data-del]").onclick = () => deleteGenre(f.id, f.name);
+    wireGenreDropTarget(li, f);
+    list.appendChild(li);
   });
 }
 
@@ -60,13 +175,60 @@ async function openGenre(genreId, genreName) {
   for (const folder of albumFolders) {
     const card = document.createElement("div");
     card.className = "album-card";
-    card.innerHTML = `<img alt="">
+    card.innerHTML = `<div class="card-actions">
+        <button data-edit title="Rename">&#9998;</button>
+        <button data-del title="Delete">&#128465;</button>
+      </div>
+      <img alt="">
       <div class="title">${folder.name}</div>
       <div class="artist"></div>`;
     grid.appendChild(card);
+    wireAlbumDropTarget(card, folder);
     loadAlbumCardMeta(folder, card); // fire-and-forget, fills in async
   }
   showLibView("album");
+}
+
+async function renameAlbum(folder, currentTitle, currentArtist) {
+  const newTitle = prompt("Album title:", currentTitle);
+  if (newTitle === null || !newTitle.trim()) return;
+  const newArtist = prompt("Artist:", currentArtist);
+  if (newArtist === null) return;
+  const data = { title: newTitle.trim(), artist: newArtist.trim() || "Unknown Artist" };
+  const meta = await findChildByName(folder.id, "metadata.json");
+  if (meta) await saveJsonFile(meta.id, data);
+  else await uploadNewFile(folder.id, "metadata.json", new Blob([JSON.stringify(data)]), "application/json");
+  openGenre(libState.genreId, libState.genreName);
+}
+
+async function deleteAlbum(folder, title) {
+  if (!confirm(`Delete "${title}" and all its songs?\n\nThis moves it to your Google Drive trash, so it's recoverable there for 30 days.`)) return;
+  await deleteFile(folder.id);
+  openGenre(libState.genreId, libState.genreName);
+}
+
+// Lets you drop more MP3/M4A files (loose, or inside a folder) straight
+// onto an existing album's cover to add them to that album, without
+// opening the Add Album modal.
+function wireAlbumDropTarget(card, folder) {
+  card.addEventListener("dragover", (e) => { e.preventDefault(); card.classList.add("drag-over"); });
+  card.addEventListener("dragleave", () => card.classList.remove("drag-over"));
+  card.addEventListener("drop", async (e) => {
+    e.preventDefault();
+    card.classList.remove("drag-over");
+    const entries = entriesFromDrop(e.dataTransfer);
+    let audioFiles = [];
+    if (entries.length) {
+      for (const entry of entries) audioFiles = audioFiles.concat(await collectAudioFiles(entry));
+    } else {
+      audioFiles = [...e.dataTransfer.files].filter((f) => /\.(mp3|m4a)$/i.test(f.name));
+    }
+    if (!audioFiles.length) return;
+    for (const file of audioFiles) {
+      await uploadNewFile(folder.id, file.name, file, file.type || "audio/mpeg");
+    }
+    openGenre(libState.genreId, libState.genreName);
+  });
 }
 
 async function loadAlbumCardMeta(folder, card) {
@@ -80,6 +242,8 @@ async function loadAlbumCardMeta(folder, card) {
   card.querySelector(".title").textContent = title;
   card.querySelector(".artist").textContent = artist;
   card.onclick = () => openAlbum(folder.id, folder.name, title, artist);
+  card.querySelector("[data-edit]").onclick = (e) => { e.stopPropagation(); renameAlbum(folder, title, artist); };
+  card.querySelector("[data-del]").onclick = (e) => { e.stopPropagation(); deleteAlbum(folder, title); };
 
   const cover = await findChildByName(folder.id, "cover.jpg") || await findChildByName(folder.id, "cover.png");
   if (cover) {
@@ -94,22 +258,39 @@ async function openAlbum(albumId, folderName, title, artist) {
   el("topTitle").textContent = title;
   const files = await listChildren(albumId, false);
   libState.songs = files.filter((f) => /\.(mp3|m4a)$/i.test(f.name));
+  renderSongList();
+  showLibView("song");
+}
+
+function renderSongList() {
   const list = el("songList");
   list.innerHTML = "";
   if (!libState.songs.length) {
     list.innerHTML = "<li>No songs in this album yet.</li>";
+    return;
   }
   libState.songs.forEach((file, idx) => {
     const li = document.createElement("li");
-    li.innerHTML = `<span class="track-name">${cleanSongTitle(file.name, artist)}</span><button data-dl>Download</button>`;
+    li.innerHTML = `<span class="track-name">${cleanSongTitle(file.name, libState.artist)}</span>
+      <span><button data-dl>Download</button><button data-del>Delete</button></span>`;
     li.querySelector(".track-name").onclick = () => playSong(idx);
     li.querySelector("[data-dl]").onclick = async () => {
       const blob = await fetchFileBlob(file.id);
       triggerBrowserDownload(blob, file.name);
     };
+    li.querySelector("[data-del]").onclick = () => deleteSong(idx);
     list.appendChild(li);
   });
-  showLibView("song");
+}
+
+async function deleteSong(idx) {
+  const file = libState.songs[idx];
+  if (!confirm(`Delete "${cleanSongTitle(file.name, libState.artist)}"?\n\nThis moves it to your Google Drive trash, so it's recoverable there for 30 days.`)) return;
+  await deleteFile(file.id);
+  libState.songs.splice(idx, 1);
+  if (libState.songIdx === idx) { el("audio").pause(); el("player").hidden = true; libState.songIdx = -1; }
+  else if (libState.songIdx > idx) libState.songIdx--;
+  renderSongList();
 }
 
 async function playSong(idx) {

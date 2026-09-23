@@ -133,8 +133,15 @@ async function saveJsonFile(fileId, data) {
   await updateFileContent(fileId, JSON.stringify(data, null, 2), "application/json");
 }
 
+// Moves a file/folder to the Drive trash (recoverable for 30 days there)
+// rather than permanently deleting it - safer for destructive actions like
+// removing a whole genre folder by mistake.
 async function deleteFile(fileId) {
-  await gapi.client.drive.files.delete({ fileId });
+  await gapi.client.drive.files.update({ fileId, resource: { trashed: true } });
+}
+
+async function renameFile(fileId, newName) {
+  await gapi.client.drive.files.update({ fileId, resource: { name: newName } });
 }
 
 function triggerBrowserDownload(blob, filename) {
