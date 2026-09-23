@@ -90,3 +90,16 @@ async function getOfflineCover(albumId) {
   const tx = db.transaction("covers", "readonly");
   return idbRequest(tx.objectStore("covers").get(albumId));
 }
+
+async function getOfflineStorageStats() {
+  const db = await openOfflineDb();
+  const tx = db.transaction(["albums", "songs", "covers"], "readonly");
+  const [albums, songs, covers] = await Promise.all([
+    idbRequest(tx.objectStore("albums").getAll()),
+    idbRequest(tx.objectStore("songs").getAll()),
+    idbRequest(tx.objectStore("covers").getAll()),
+  ]);
+  const songBytes = songs.reduce((sum, s) => sum + (s.blob ? s.blob.size : 0), 0);
+  const coverBytes = covers.reduce((sum, c) => sum + (c.blob ? c.blob.size : 0), 0);
+  return { albumCount: albums.length, songCount: songs.length, totalBytes: songBytes + coverBytes };
+}

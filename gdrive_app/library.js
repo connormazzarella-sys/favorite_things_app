@@ -287,7 +287,28 @@ function wireGenreViewDropZone() {
 }
 wireGenreViewDropZone();
 
+function formatBytes(bytes) {
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ["KB", "MB", "GB"];
+  let val = bytes / 1024;
+  let i = 0;
+  while (val >= 1024 && i < units.length - 1) { val /= 1024; i++; }
+  return `${val.toFixed(val < 10 ? 1 : 0)} ${units[i]}`;
+}
+
+async function renderOfflineStorageInfo() {
+  const infoEl = el("offlineStorageInfo");
+  if (!infoEl) return;
+  const stats = await getOfflineStorageStats();
+  if (!stats.albumCount) {
+    infoEl.textContent = "";
+    return;
+  }
+  infoEl.textContent = `\u{1F4E6} ${stats.albumCount} album${stats.albumCount === 1 ? "" : "s"} (${stats.songCount} song${stats.songCount === 1 ? "" : "s"}) downloaded offline · ${formatBytes(stats.totalBytes)} used`;
+}
+
 async function loadGenres() {
+  renderOfflineStorageInfo();
   const folders = await listChildren(driveIds.music, true);
   const list = el("genreList");
   list.innerHTML = "";
@@ -385,6 +406,7 @@ function wireOfflineButton(btn, folder, title, artist) {
       if (!confirm(`Remove "${title}" from offline downloads?\n\nIt stays in your Google Drive library - this only frees up space on this device.`)) return;
       await removeAlbumOffline(folder.id);
       setOfflineButtonState(btn, false);
+      renderOfflineStorageInfo();
       return;
     }
     btn.disabled = true;
@@ -392,6 +414,7 @@ function wireOfflineButton(btn, folder, title, artist) {
     try {
       await downloadAlbumForOffline(folder, title, artist);
       setOfflineButtonState(btn, true);
+      renderOfflineStorageInfo();
     } catch (err) {
       console.error(err);
       alert("Couldn't download this album for offline use - see console.");
@@ -512,6 +535,7 @@ function renderSongList() {
 
 // ---------- Offline library (browsed from IndexedDB, no Drive/network) ----------
 async function loadOfflineGenres() {
+  renderOfflineStorageInfo();
   const genres = await listOfflineGenres();
   const list = el("genreList");
   list.innerHTML = "";
